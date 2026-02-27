@@ -1,0 +1,47 @@
+# Python cache/artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test/cache tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build/package artifacts
+build/
+dist/
+*.spec
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local app settings
+.borehole_stick_gui_settings.json
+
+# Generated outputs
+Outputs/
+*.srf
+*.bln
+*.shp
+*.shx
+*.dbf
+*.prj
+*_postmap.csv
+*_postmap_labels.csv
+*_palette.csv
+*_qa.csv
+*_surfer_autoload.py
+*_run_surfer_autoload.bat

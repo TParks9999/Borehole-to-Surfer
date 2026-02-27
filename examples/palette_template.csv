@@ -1,0 +1,4 @@
+classification_column,category,color_hex
+lithology,SANDSTONE,#F0D63A
+lithology,SILTSTONE,#8B8B8B
+lithology,CLAYSTONE,#A86B4C

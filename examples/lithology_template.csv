@@ -1,0 +1,5 @@
+hole_id,from_depth,to_depth,lithology
+BH001,0,2,SANDSTONE
+BH001,2,6,SILTSTONE
+BH002,0,3,SANDSTONE
+BH002,3,8,CLAYSTONE
