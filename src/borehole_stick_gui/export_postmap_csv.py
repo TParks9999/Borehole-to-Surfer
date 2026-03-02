@@ -8,34 +8,7 @@ import pandas as pd
 from .models import CollarRecord, ProjectedHole
 
 
-PRESET_CONFIG = {
-    # Light keeps the most labels, Strong keeps the fewest.
-    "Light": {
-        "major_category_share_threshold": 0.05,
-        "top_categories_n": 5,
-        "dx_min_global": 6.0,
-        "dy_min_global": 0.6,
-        "dy_min_hole": 0.6,
-        "min_labels_per_hole": 8,
-    },
-    "Medium": {
-        "major_category_share_threshold": 0.08,
-        "top_categories_n": 4,
-        "dx_min_global": 10.0,
-        "dy_min_global": 1.0,
-        "dy_min_hole": 1.0,
-        "min_labels_per_hole": 5,
-    },
-    "Strong": {
-        "major_category_share_threshold": 0.12,
-        "top_categories_n": 3,
-        "dx_min_global": 14.0,
-        "dy_min_global": 1.4,
-        "dy_min_hole": 1.4,
-        "min_labels_per_hole": 3,
-    },
-}
-
+DEFAULT_MIN_LABEL_LENGTH_M = 1.0
 DEFAULT_THIN_MIN_ABS_M = 0.3
 DEFAULT_THIN_RELATIVE_TO_MEDIAN = 0.2
 DEFAULT_ADJACENT_GAP_TOLERANCE_M = 0.05
@@ -146,38 +119,6 @@ def _add_computed_columns(df: pd.DataFrame, lith_df: pd.DataFrame) -> pd.DataFra
     return out[computed_order + original_order].copy()
 
 
-def _select_major_rows(
-    df: pd.DataFrame, major_category_share_threshold: float, top_categories_n: int
-) -> pd.DataFrame:
-    work = df.copy()
-    selected: list[pd.DataFrame] = []
-
-    for hole_id, hole_rows in work.groupby("_hole_id", sort=False):
-        category_totals = (
-            hole_rows.groupby("_category", as_index=False)["_thickness"].sum().sort_values(
-                by="_thickness", ascending=False
-            )
-        )
-        total = float(category_totals["_thickness"].sum())
-        if total <= 0:
-            selected.append(hole_rows)
-            continue
-        category_totals["_share"] = category_totals["_thickness"] / total
-        category_totals["_rank"] = range(1, len(category_totals) + 1)
-        keep_categories = set(
-            category_totals[
-                (category_totals["_share"] >= major_category_share_threshold)
-                | (category_totals["_rank"] <= top_categories_n)
-            ]["_category"].astype(str)
-        )
-        if not keep_categories:
-            keep_categories = {str(category_totals.iloc[0]["_category"])}
-        selected.append(hole_rows[hole_rows["_category"].astype(str).isin(keep_categories)].copy())
-
-    out = pd.concat(selected, ignore_index=True) if selected else work.iloc[0:0].copy()
-    return out
-
-
 def _apply_thin_filter(
     df: pd.DataFrame, thin_min_abs_m: float, thin_relative_to_median: float
 ) -> pd.DataFrame:
@@ -257,72 +198,11 @@ def _consolidate_adjacent_intervals(df: pd.DataFrame, gap_tolerance_m: float) ->
     return out
 
 
-def _spacing_thin(
-    df: pd.DataFrame,
-    dx_min_global: float,
-    dy_min_global: float,
-    dy_min_hole: float,
-    min_labels_per_hole: int,
-) -> pd.DataFrame:
+def _apply_min_label_length_filter(df: pd.DataFrame, min_label_length_m: float) -> pd.DataFrame:
     work = df.copy()
     if work.empty:
         return work
-
-    # Stage 1: Thin within each hole by vertical separation while keeping thicker intervals first.
-    per_hole_kept: list[pd.DataFrame] = []
-    for hole_id, hole_rows in work.groupby("_hole_id", sort=False):
-        candidates = hole_rows.sort_values(
-            by=["_thickness", "_from_depth"], ascending=[False, True]
-        ).copy()
-        accepted_idx: list[int] = []
-        accepted_y: list[float] = []
-        for idx, row in candidates.iterrows():
-            y = float(row["elevation_mid"])
-            if not any(abs(y - ay) < dy_min_hole for ay in accepted_y):
-                accepted_idx.append(idx)
-                accepted_y.append(y)
-
-        # Guarantee a useful number of labels per hole.
-        if len(accepted_idx) < min_labels_per_hole:
-            by_depth = hole_rows.sort_values(by="_from_depth", ascending=True)
-            for idx in by_depth.index:
-                if idx not in accepted_idx:
-                    accepted_idx.append(idx)
-                    if len(accepted_idx) >= min_labels_per_hole:
-                        break
-
-        per_hole_kept.append(hole_rows.loc[accepted_idx].copy())
-
-    stage1 = pd.concat(per_hole_kept, ignore_index=True)
-
-    # Stage 2: Global thinning across different holes only (avoid overlapping labels between nearby holes).
-    candidates = stage1.sort_values(
-        by=["_thickness", "_hole_id", "_from_depth"], ascending=[False, True, True]
-    )
-    accepted_rows = []
-    accepted_points: list[tuple[str, float, float]] = []
-    for _, row in candidates.iterrows():
-        hole = str(row["_hole_id"])
-        x = float(row["chainage"])
-        y = float(row["elevation_mid"])
-        too_close_other_hole = any(
-            (hole != ahole) and abs(x - ax) < dx_min_global and abs(y - ay) < dy_min_global
-            for ahole, ax, ay in accepted_points
-        )
-        if not too_close_other_hole:
-            accepted_rows.append(row.copy())
-            accepted_points.append((hole, x, y))
-
-    out = pd.DataFrame(accepted_rows, columns=candidates.columns)
-
-    # Final safeguard: keep at least one label per hole.
-    kept_holes = set(out["_hole_id"].astype(str)) if not out.empty else set()
-    for hole_id, hole_rows in stage1.groupby("_hole_id", sort=False):
-        if str(hole_id) not in kept_holes:
-            idx = hole_rows["_thickness"].idxmax()
-            out = pd.concat([out, stage1.loc[[idx]]], ignore_index=True)
-
-    return out
+    return work[work["_thickness"] >= float(min_label_length_m)].copy()
 
 
 def build_postmap_dataframes(
@@ -332,7 +212,7 @@ def build_postmap_dataframes(
     projected_holes: Iterable[ProjectedHole],
     collars: Iterable[CollarRecord],
     smart_filter_enabled: bool = True,
-    density_preset: str = "Medium",
+    min_label_length_m: float = DEFAULT_MIN_LABEL_LENGTH_M,
     thin_filter_enabled: bool = True,
     thin_min_abs_m: float = DEFAULT_THIN_MIN_ABS_M,
     thin_relative_to_median: float = DEFAULT_THIN_RELATIVE_TO_MEDIAN,
@@ -351,7 +231,6 @@ def build_postmap_dataframes(
     if not smart_filter_enabled:
         return full_df, full_df.copy()
 
-    config = PRESET_CONFIG.get(density_preset, PRESET_CONFIG["Medium"])
     label_candidates = base_df.copy()
     if thin_filter_enabled:
         label_candidates = _apply_thin_filter(
@@ -364,25 +243,16 @@ def build_postmap_dataframes(
             label_candidates, gap_tolerance_m=float(adjacent_gap_tolerance_m)
         )
 
-    major_df = _select_major_rows(
-        label_candidates,
-        major_category_share_threshold=float(config["major_category_share_threshold"]),
-        top_categories_n=int(config["top_categories_n"]),
-    )
-    labels_raw = _spacing_thin(
-        major_df,
-        dx_min_global=float(config["dx_min_global"]),
-        dy_min_global=float(config["dy_min_global"]),
-        dy_min_hole=float(config["dy_min_hole"]),
-        min_labels_per_hole=int(config["min_labels_per_hole"]),
+    labels_raw = _apply_min_label_length_filter(
+        label_candidates, min_label_length_m=float(min_label_length_m)
     )
 
     # Ensure each included hole keeps at least one label row.
-    by_hole_labels = set(labels_raw["_hole_id"].astype(str).tolist())
-    for hole_id, hole_rows in major_df.groupby("_hole_id"):
+    by_hole_labels = set(labels_raw["_hole_id"].astype(str).tolist()) if not labels_raw.empty else set()
+    for hole_id, hole_rows in label_candidates.groupby("_hole_id", sort=False):
         if str(hole_id) not in by_hole_labels:
             idx = hole_rows["_thickness"].idxmax()
-            labels_raw = pd.concat([labels_raw, major_df.loc[[idx]]], ignore_index=True)
+            labels_raw = pd.concat([labels_raw, label_candidates.loc[[idx]]], ignore_index=True)
 
     labels_df = _add_computed_columns(labels_raw, lith_df)
     return full_df, labels_df
@@ -397,7 +267,7 @@ def write_postmap_csvs(
     projected_holes: Iterable[ProjectedHole],
     collars: Iterable[CollarRecord],
     smart_filter_enabled: bool = True,
-    density_preset: str = "Medium",
+    min_label_length_m: float = DEFAULT_MIN_LABEL_LENGTH_M,
     thin_filter_enabled: bool = True,
     thin_min_abs_m: float = DEFAULT_THIN_MIN_ABS_M,
     thin_relative_to_median: float = DEFAULT_THIN_RELATIVE_TO_MEDIAN,
@@ -411,7 +281,7 @@ def write_postmap_csvs(
         projected_holes=projected_holes,
         collars=collars,
         smart_filter_enabled=smart_filter_enabled,
-        density_preset=density_preset,
+        min_label_length_m=min_label_length_m,
         thin_filter_enabled=thin_filter_enabled,
         thin_min_abs_m=thin_min_abs_m,
         thin_relative_to_median=thin_relative_to_median,

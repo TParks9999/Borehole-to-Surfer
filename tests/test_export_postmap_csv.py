@@ -82,13 +82,13 @@ def test_label_filter_reduces_crowded_rows(tmp_path: Path):
         projected_holes=projected,
         collars=collars,
         smart_filter_enabled=True,
-        density_preset="Strong",
+        min_label_length_m=0.5,
     )
     assert full_rows == 10
     assert label_rows < full_rows
 
 
-def test_label_filter_presets_are_monotonic(tmp_path: Path):
+def test_label_filter_min_length_is_monotonic(tmp_path: Path):
     rows = []
     depth = 0.0
     for i in range(30):
@@ -107,16 +107,16 @@ def test_label_filter_presets_are_monotonic(tmp_path: Path):
     projected = [ProjectedHole("BH1", 0.0, 0.0, 100.0, 100.0, 0.0, True, "ok")]
     collars = [CollarRecord("BH1", 0.0, 0.0, 100.0)]
 
-    _, _, _, n_light = write_postmap_csvs(
-        full_path=tmp_path / "full_light.csv",
-        labels_path=tmp_path / "labels_light.csv",
+    _, _, _, n_loose = write_postmap_csvs(
+        full_path=tmp_path / "full_loose.csv",
+        labels_path=tmp_path / "labels_loose.csv",
         lith_df=lith_df,
         lith_mapping=lith_mapping,
         classification_field="lithology",
         projected_holes=projected,
         collars=collars,
         smart_filter_enabled=True,
-        density_preset="Light",
+        min_label_length_m=0.0,
     )
     _, _, _, n_medium = write_postmap_csvs(
         full_path=tmp_path / "full_medium.csv",
@@ -127,22 +127,22 @@ def test_label_filter_presets_are_monotonic(tmp_path: Path):
         projected_holes=projected,
         collars=collars,
         smart_filter_enabled=True,
-        density_preset="Medium",
+        min_label_length_m=1.0,
     )
-    _, _, _, n_strong = write_postmap_csvs(
-        full_path=tmp_path / "full_strong.csv",
-        labels_path=tmp_path / "labels_strong.csv",
+    _, _, _, n_tight = write_postmap_csvs(
+        full_path=tmp_path / "full_tight.csv",
+        labels_path=tmp_path / "labels_tight.csv",
         lith_df=lith_df,
         lith_mapping=lith_mapping,
         classification_field="lithology",
         projected_holes=projected,
         collars=collars,
         smart_filter_enabled=True,
-        density_preset="Strong",
+        min_label_length_m=2.0,
     )
 
-    assert n_light >= n_medium >= n_strong
-    assert n_strong >= 1
+    assert n_loose >= n_medium >= n_tight
+    assert n_tight >= 1
 
 
 def test_hybrid_thin_filter_suppresses_thin_units(tmp_path: Path):
@@ -166,7 +166,7 @@ def test_hybrid_thin_filter_suppresses_thin_units(tmp_path: Path):
         projected_holes=projected,
         collars=collars,
         smart_filter_enabled=True,
-        density_preset="Light",
+        min_label_length_m=0.0,
         thin_filter_enabled=False,
         merge_adjacent_enabled=False,
     )
@@ -179,7 +179,7 @@ def test_hybrid_thin_filter_suppresses_thin_units(tmp_path: Path):
         projected_holes=projected,
         collars=collars,
         smart_filter_enabled=True,
-        density_preset="Light",
+        min_label_length_m=0.0,
         thin_filter_enabled=True,
         thin_min_abs_m=0.3,
         thin_relative_to_median=0.2,
@@ -214,7 +214,7 @@ def test_adjacent_same_category_near_gap_consolidates_to_one_label(tmp_path: Pat
         projected_holes=projected,
         collars=collars,
         smart_filter_enabled=True,
-        density_preset="Light",
+        min_label_length_m=0.0,
         thin_filter_enabled=False,
         merge_adjacent_enabled=True,
         adjacent_gap_tolerance_m=0.05,
@@ -248,10 +248,106 @@ def test_adjacent_same_category_gap_above_tolerance_not_consolidated(tmp_path: P
         projected_holes=projected,
         collars=collars,
         smart_filter_enabled=True,
-        density_preset="Light",
+        min_label_length_m=0.0,
         thin_filter_enabled=False,
         merge_adjacent_enabled=True,
         adjacent_gap_tolerance_m=0.05,
     )
 
     assert label_rows == 2
+
+
+def test_min_length_filter_keeps_thick_interval_from_minor_category(tmp_path: Path):
+    lith_df = pd.DataFrame(
+        [
+            {"hole_id": "BH1", "from": 0.0, "to": 30.0, "lithology": "A", "unit": "A1"},
+            {"hole_id": "BH1", "from": 30.0, "to": 55.0, "lithology": "B", "unit": "B1"},
+            {"hole_id": "BH1", "from": 55.0, "to": 75.0, "lithology": "C", "unit": "C1"},
+            {"hole_id": "BH1", "from": 75.0, "to": 81.0, "lithology": "D", "unit": "D_major"},
+            {"hole_id": "BH1", "from": 81.0, "to": 82.0, "lithology": "D", "unit": "D_minor1"},
+            {"hole_id": "BH1", "from": 82.0, "to": 83.0, "lithology": "D", "unit": "D_minor2"},
+            {"hole_id": "BH1", "from": 83.0, "to": 84.0, "lithology": "E", "unit": "E1"},
+            {"hole_id": "BH1", "from": 84.0, "to": 85.0, "lithology": "F", "unit": "F1"},
+        ]
+    )
+    lith_mapping = {"hole_id": "hole_id", "from_depth": "from", "to_depth": "to", "lithology": "lithology"}
+    projected = [ProjectedHole("BH1", 0.0, 0.0, 100.0, 100.0, 0.0, True, "ok")]
+    collars = [CollarRecord("BH1", 0.0, 0.0, 100.0)]
+
+    _, _, labels_path, _ = write_postmap_csvs(
+        full_path=tmp_path / "full.csv",
+        labels_path=tmp_path / "labels.csv",
+        lith_df=lith_df,
+        lith_mapping=lith_mapping,
+        classification_field="lithology",
+        projected_holes=projected,
+        collars=collars,
+        smart_filter_enabled=True,
+        min_label_length_m=5.0,
+        thin_filter_enabled=False,
+        merge_adjacent_enabled=False,
+    )
+
+    labels_df = pd.read_csv(labels_path)
+    assert "D_major" in labels_df["unit"].tolist()
+
+
+def test_min_length_threshold_boundary(tmp_path: Path):
+    lith_df = pd.DataFrame(
+        [
+            {"hole_id": "BH1", "from": 0.0, "to": 0.99, "lithology": "A", "unit": "u_below"},
+            {"hole_id": "BH1", "from": 1.0, "to": 2.0, "lithology": "A", "unit": "u_equal"},
+            {"hole_id": "BH1", "from": 2.0, "to": 3.01, "lithology": "A", "unit": "u_above"},
+        ]
+    )
+    lith_mapping = {"hole_id": "hole_id", "from_depth": "from", "to_depth": "to", "lithology": "lithology"}
+    projected = [ProjectedHole("BH1", 0.0, 0.0, 100.0, 100.0, 0.0, True, "ok")]
+    collars = [CollarRecord("BH1", 0.0, 0.0, 100.0)]
+
+    _, _, labels_path, label_rows = write_postmap_csvs(
+        full_path=tmp_path / "full.csv",
+        labels_path=tmp_path / "labels.csv",
+        lith_df=lith_df,
+        lith_mapping=lith_mapping,
+        classification_field="lithology",
+        projected_holes=projected,
+        collars=collars,
+        smart_filter_enabled=True,
+        min_label_length_m=1.0,
+        thin_filter_enabled=False,
+        merge_adjacent_enabled=False,
+    )
+
+    assert label_rows == 2
+    labels_df = pd.read_csv(labels_path)
+    assert sorted(labels_df["unit"].tolist()) == ["u_above", "u_equal"]
+
+
+def test_min_length_filter_has_one_label_per_hole_fallback(tmp_path: Path):
+    lith_df = pd.DataFrame(
+        [
+            {"hole_id": "BH1", "from": 0.0, "to": 0.2, "lithology": "A", "unit": "u1"},
+            {"hole_id": "BH1", "from": 0.2, "to": 0.35, "lithology": "B", "unit": "u2"},
+        ]
+    )
+    lith_mapping = {"hole_id": "hole_id", "from_depth": "from", "to_depth": "to", "lithology": "lithology"}
+    projected = [ProjectedHole("BH1", 0.0, 0.0, 100.0, 100.0, 0.0, True, "ok")]
+    collars = [CollarRecord("BH1", 0.0, 0.0, 100.0)]
+
+    _, _, labels_path, label_rows = write_postmap_csvs(
+        full_path=tmp_path / "full.csv",
+        labels_path=tmp_path / "labels.csv",
+        lith_df=lith_df,
+        lith_mapping=lith_mapping,
+        classification_field="lithology",
+        projected_holes=projected,
+        collars=collars,
+        smart_filter_enabled=True,
+        min_label_length_m=5.0,
+        thin_filter_enabled=False,
+        merge_adjacent_enabled=False,
+    )
+
+    assert label_rows == 1
+    labels_df = pd.read_csv(labels_path)
+    assert labels_df["unit"].tolist() == ["u1"]

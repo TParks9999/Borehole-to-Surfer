@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections import Counter
+import ctypes
 import json
 from pathlib import Path
 import subprocess
-from tkinter import BooleanVar, END, StringVar, Tk, colorchooser, filedialog, messagebox
+import sys
+from tkinter import BooleanVar, END, Label, StringVar, Tk, Toplevel, colorchooser, filedialog, messagebox
 from tkinter import ttk
 from typing import Any
 
@@ -66,7 +68,7 @@ class BoreholeStickApp(ttk.Frame):
         self.max_offset = StringVar(value="25")
         self.rect_width = StringVar(value="2")
         self.smart_label_filter_enabled = BooleanVar(value=True)
-        self.label_density_preset = StringVar(value="Medium")
+        self.min_label_length_m = StringVar(value="1.0")
         self.thin_filter_enabled = BooleanVar(value=True)
         self.merge_adjacent_enabled = BooleanVar(value=True)
         self.thin_min_abs_m = StringVar(value="0.3")
@@ -80,6 +82,7 @@ class BoreholeStickApp(ttk.Frame):
         self.lith_map_vars: dict[str, StringVar] = {}
         self.category_list: ttk.Treeview | None = None
         self.log_box: ttk.Treeview | None = None
+        self._label_filter_widgets: list[ttk.Widget] = []
 
         self.settings_path = Path.home() / ".borehole_stick_gui_settings.json"
         self._saved_collar_mapping: dict[str, str] = {}
@@ -109,7 +112,7 @@ class BoreholeStickApp(ttk.Frame):
             ("max_offset", self.max_offset),
             ("rect_width", self.rect_width),
             ("category_field", self.category_field),
-            ("label_density_preset", self.label_density_preset),
+            ("min_label_length_m", self.min_label_length_m),
             ("thin_min_abs_m", self.thin_min_abs_m),
             ("thin_relative_to_median", self.thin_relative_to_median),
             ("adjacent_gap_tolerance_m", self.adjacent_gap_tolerance_m),
@@ -146,7 +149,7 @@ class BoreholeStickApp(ttk.Frame):
             "rect_width": self.rect_width.get(),
             "category_field": self.category_field.get(),
             "smart_label_filter_enabled": bool(self.smart_label_filter_enabled.get()),
-            "label_density_preset": self.label_density_preset.get(),
+            "min_label_length_m": self.min_label_length_m.get(),
             "thin_filter_enabled": bool(self.thin_filter_enabled.get()),
             "merge_adjacent_enabled": bool(self.merge_adjacent_enabled.get()),
             "thin_min_abs_m": self.thin_min_abs_m.get(),
@@ -192,7 +195,7 @@ class BoreholeStickApp(ttk.Frame):
         self.max_offset.set("25")
         self.rect_width.set("2")
         self.smart_label_filter_enabled.set(True)
-        self.label_density_preset.set("Medium")
+        self.min_label_length_m.set("1.0")
         self.thin_filter_enabled.set(True)
         self.merge_adjacent_enabled.set(True)
         self.thin_min_abs_m.set("0.3")
@@ -219,6 +222,7 @@ class BoreholeStickApp(ttk.Frame):
             except Exception as exc:
                 messagebox.showwarning("Reset Settings", f"Could not remove settings file: {exc}")
                 return
+        self._apply_label_filter_widget_state()
         self._log("Settings reset to defaults.")
 
     def _autoload_recent_files(self) -> None:
@@ -256,61 +260,84 @@ class BoreholeStickApp(ttk.Frame):
 
         options_frame = ttk.LabelFrame(self, text="Options")
         options_frame.grid(row=2, column=0, sticky="ew", padx=2, pady=2)
-        for idx in range(6):
-            options_frame.columnconfigure(idx, weight=1)
-        ttk.Label(options_frame, text="Max Off-Line Distance (m)").grid(row=0, column=0, sticky="w")
-        ttk.Entry(options_frame, textvariable=self.max_offset, width=12).grid(row=1, column=0, sticky="w")
-        ttk.Label(options_frame, text="Stick Width (m)").grid(row=0, column=1, sticky="w")
-        ttk.Entry(options_frame, textvariable=self.rect_width, width=12).grid(row=1, column=1, sticky="w")
-        ttk.Label(options_frame, text="Classification Column").grid(row=0, column=2, sticky="w")
-        self.category_combo = ttk.Combobox(
-            options_frame, textvariable=self.category_field, state="readonly", width=28
+        options_frame.columnconfigure(0, weight=1)
+        options_frame.columnconfigure(1, weight=1)
+
+        basic_frame = ttk.LabelFrame(options_frame, text="Basic")
+        basic_frame.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
+        basic_frame.columnconfigure(1, weight=1)
+        ttk.Label(basic_frame, text="Max Off-Line Distance (m)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(basic_frame, textvariable=self.max_offset, width=14).grid(
+            row=0, column=1, sticky="w", padx=(8, 0)
         )
-        self.category_combo.grid(row=1, column=2, sticky="ew", padx=2)
+        ttk.Label(basic_frame, text="Stick Width (m)").grid(row=1, column=0, sticky="w")
+        ttk.Entry(basic_frame, textvariable=self.rect_width, width=14).grid(
+            row=1, column=1, sticky="w", padx=(8, 0)
+        )
+        ttk.Label(basic_frame, text="Classification Column").grid(row=2, column=0, sticky="w")
+        self.category_combo = ttk.Combobox(
+            basic_frame, textvariable=self.category_field, state="readonly", width=28
+        )
+        self.category_combo.grid(row=2, column=1, sticky="ew", padx=(8, 0))
         self.category_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_palette_view())
-        ttk.Checkbutton(
-            options_frame,
+
+        filter_frame = ttk.LabelFrame(options_frame, text="Label Filtering")
+        filter_frame.grid(row=0, column=1, sticky="nsew", padx=2, pady=2)
+        filter_frame.columnconfigure(0, weight=1)
+        filter_frame.columnconfigure(1, weight=1)
+
+        smart_filter_check = ttk.Checkbutton(
+            filter_frame,
             text="Smart label filter (major units + spacing)",
             variable=self.smart_label_filter_enabled,
-            command=self._save_settings,
-        ).grid(row=0, column=3, columnspan=2, sticky="w")
-        ttk.Label(options_frame, text="Label Density").grid(row=0, column=5, sticky="w")
-        density_combo = ttk.Combobox(
-            options_frame,
-            textvariable=self.label_density_preset,
-            state="readonly",
-            values=["Light", "Medium", "Strong"],
-            width=10,
+            command=self._on_smart_filter_toggle,
         )
-        density_combo.grid(row=1, column=5, sticky="w")
-        density_combo.bind("<<ComboboxSelected>>", lambda _e: self._save_settings())
+        smart_filter_check.grid(row=0, column=0, columnspan=2, sticky="w")
 
-        ttk.Checkbutton(
-            options_frame,
+        ttk.Label(filter_frame, text="Minimum label length (m)").grid(
+            row=1, column=0, sticky="w", pady=(4, 0)
+        )
+        min_label_len_entry = ttk.Entry(filter_frame, textvariable=self.min_label_length_m, width=12)
+        min_label_len_entry.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
+        min_label_len_entry.bind("<FocusOut>", lambda _e: self._save_settings())
+
+        thin_filter_check = ttk.Checkbutton(
+            filter_frame,
             text="Thin-unit suppression",
             variable=self.thin_filter_enabled,
             command=self._save_settings,
-        ).grid(row=2, column=0, columnspan=2, sticky="w")
-        ttk.Label(options_frame, text="Thin min abs (m)").grid(row=2, column=2, sticky="w")
-        thin_abs_entry = ttk.Entry(options_frame, textvariable=self.thin_min_abs_m, width=12)
-        thin_abs_entry.grid(row=3, column=2, sticky="w")
+        )
+        thin_filter_check.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(filter_frame, text="Thin min abs (m)").grid(row=3, column=0, sticky="w")
+        thin_abs_entry = ttk.Entry(filter_frame, textvariable=self.thin_min_abs_m, width=12)
+        thin_abs_entry.grid(row=3, column=1, sticky="w", padx=(8, 0))
         thin_abs_entry.bind("<FocusOut>", lambda _e: self._save_settings())
 
-        ttk.Label(options_frame, text="Thin relative factor").grid(row=2, column=3, sticky="w")
-        thin_rel_entry = ttk.Entry(options_frame, textvariable=self.thin_relative_to_median, width=12)
-        thin_rel_entry.grid(row=3, column=3, sticky="w")
+        ttk.Label(filter_frame, text="Thin relative factor").grid(row=4, column=0, sticky="w")
+        thin_rel_entry = ttk.Entry(filter_frame, textvariable=self.thin_relative_to_median, width=12)
+        thin_rel_entry.grid(row=4, column=1, sticky="w", padx=(8, 0))
         thin_rel_entry.bind("<FocusOut>", lambda _e: self._save_settings())
 
-        ttk.Checkbutton(
-            options_frame,
+        merge_adjacent_check = ttk.Checkbutton(
+            filter_frame,
             text="Merge adjacent same-category units",
             variable=self.merge_adjacent_enabled,
             command=self._save_settings,
-        ).grid(row=2, column=4, sticky="w")
-        ttk.Label(options_frame, text="Adj. gap tolerance (m)").grid(row=2, column=5, sticky="w")
-        adj_gap_entry = ttk.Entry(options_frame, textvariable=self.adjacent_gap_tolerance_m, width=12)
-        adj_gap_entry.grid(row=3, column=5, sticky="w")
+        )
+        merge_adjacent_check.grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(filter_frame, text="Adj. gap tolerance (m)").grid(row=6, column=0, sticky="w")
+        adj_gap_entry = ttk.Entry(filter_frame, textvariable=self.adjacent_gap_tolerance_m, width=12)
+        adj_gap_entry.grid(row=6, column=1, sticky="w", padx=(8, 0))
         adj_gap_entry.bind("<FocusOut>", lambda _e: self._save_settings())
+        self._label_filter_widgets = [
+            min_label_len_entry,
+            thin_filter_check,
+            thin_abs_entry,
+            thin_rel_entry,
+            merge_adjacent_check,
+            adj_gap_entry,
+        ]
+        self._apply_label_filter_widget_state()
 
         output_frame = ttk.LabelFrame(self, text="Output")
         output_frame.grid(row=3, column=0, sticky="ew", padx=2, pady=2)
@@ -333,15 +360,11 @@ class BoreholeStickApp(ttk.Frame):
         palette_frame.rowconfigure(0, weight=1)
         self.rowconfigure(5, weight=1)
 
-        self.category_list = ttk.Treeview(
-            palette_frame, columns=("category", "color", "swatch"), show="headings", height=10
-        )
+        self.category_list = ttk.Treeview(palette_frame, columns=("category", "color"), show="headings", height=10)
         self.category_list.heading("category", text="Category")
         self.category_list.heading("color", text="Color")
-        self.category_list.heading("swatch", text="Swatch")
-        self.category_list.column("category", width=260)
-        self.category_list.column("color", width=120)
-        self.category_list.column("swatch", width=90, anchor="center")
+        self.category_list.column("category", width=320)
+        self.category_list.column("color", width=180)
         self.category_list.grid(row=0, column=0, sticky="nsew")
         palette_btns = ttk.Frame(palette_frame)
         palette_btns.grid(row=1, column=0, sticky="ew", pady=2)
@@ -391,6 +414,18 @@ class BoreholeStickApp(ttk.Frame):
         if path:
             self.output_dir.set(path)
             self._save_settings()
+
+    def _on_smart_filter_toggle(self) -> None:
+        self._apply_label_filter_widget_state()
+        self._save_settings()
+
+    def _apply_label_filter_widget_state(self) -> None:
+        state = "normal" if self.smart_label_filter_enabled.get() else "disabled"
+        for widget in self._label_filter_widgets:
+            try:
+                widget.configure(state=state)
+            except Exception:
+                continue
 
     def _load_collar_path(self, path: str | Path) -> None:
         self.collar_df = read_csv(path)
@@ -502,7 +537,154 @@ class BoreholeStickApp(ttk.Frame):
                 self.category_list.tag_configure(tag, background=color)
             except Exception:
                 pass
-            self.category_list.insert("", END, values=(cat, color, "      "), tags=(tag,))
+            self.category_list.insert("", END, values=(cat, color), tags=(tag,))
+
+    def _validate_hex_color(self, value: str) -> str | None:
+        text = str(value).strip()
+        if text.startswith("#"):
+            text = text[1:]
+        if len(text) not in (3, 6):
+            return None
+        if not all(ch in "0123456789abcdefABCDEF" for ch in text):
+            return None
+        return normalize_hex(text)
+
+    def _sample_screen_color_windows(self, x: int, y: int) -> str | None:
+        if not sys.platform.startswith("win"):
+            return None
+        try:
+            user32 = ctypes.windll.user32
+            gdi32 = ctypes.windll.gdi32
+            hdc = user32.GetDC(0)
+            if hdc == 0:
+                return None
+            pixel = gdi32.GetPixel(hdc, int(x), int(y))
+            user32.ReleaseDC(0, hdc)
+            if pixel == -1:
+                return None
+            red = pixel & 0xFF
+            green = (pixel >> 8) & 0xFF
+            blue = (pixel >> 16) & 0xFF
+            return f"#{red:02X}{green:02X}{blue:02X}"
+        except Exception:
+            return None
+
+    def _pick_color_from_screen(self) -> str | None:
+        if not sys.platform.startswith("win"):
+            messagebox.showinfo(
+                "Screen Picker Unavailable",
+                "Screen color sampling is currently available on Windows only.",
+            )
+            return None
+
+        result: dict[str, str | None] = {"hex": None}
+        overlay: Toplevel | None = None
+        try:
+            overlay = Toplevel(self.root)
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            overlay.geometry(f"{screen_w}x{screen_h}+0+0")
+            overlay.overrideredirect(True)
+            overlay.attributes("-alpha", 0.01)
+            overlay.attributes("-topmost", True)
+            overlay.configure(cursor="crosshair", bg="black")
+
+            def on_click(event) -> None:
+                overlay.withdraw()
+                overlay.update_idletasks()
+                sampled = self._sample_screen_color_windows(event.x_root, event.y_root)
+                result["hex"] = sampled
+                overlay.destroy()
+
+            def on_cancel(_event=None) -> None:
+                overlay.destroy()
+
+            overlay.bind("<Button-1>", on_click)
+            overlay.bind("<Escape>", on_cancel)
+            overlay.focus_force()
+            overlay.grab_set()
+            overlay.wait_window()
+        except Exception as exc:
+            messagebox.showwarning("Screen Picker", f"Could not pick screen color: {exc}")
+        finally:
+            try:
+                if overlay is not None and overlay.winfo_exists():
+                    overlay.destroy()
+            except Exception:
+                pass
+        return result["hex"]
+
+    def _open_color_editor_dialog(self, category: str, initial_hex: str) -> str | None:
+        dialog = Toplevel(self.root)
+        dialog.title(f"Edit Color: {category}")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        dialog.columnconfigure(1, weight=1)
+
+        color_var = StringVar(value=normalize_hex(initial_hex))
+        result: dict[str, str | None] = {"hex": None}
+
+        ttk.Label(dialog, text="Color code (#RRGGBB)").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
+        entry = ttk.Entry(dialog, textvariable=color_var, width=18)
+        entry.grid(row=0, column=1, sticky="ew", padx=8, pady=(8, 4))
+
+        ttk.Label(dialog, text="Preview").grid(row=1, column=0, sticky="w", padx=8, pady=4)
+        preview = Label(dialog, text="        ")
+        preview.grid(row=1, column=1, sticky="w", padx=8, pady=4)
+
+        def update_preview() -> None:
+            parsed = self._validate_hex_color(color_var.get())
+            try:
+                preview.configure(background=parsed or "#808080")
+            except Exception:
+                pass
+
+        def on_native_picker() -> None:
+            parsed = self._validate_hex_color(color_var.get()) or "#808080"
+            _, chosen = colorchooser.askcolor(color=parsed, title=f"Pick color for {category}")
+            if chosen:
+                color_var.set(chosen.upper())
+                update_preview()
+
+        def on_screen_pick() -> None:
+            dialog.withdraw()
+            self.root.withdraw()
+            self.root.update_idletasks()
+            chosen = self._pick_color_from_screen()
+            self.root.deiconify()
+            dialog.deiconify()
+            dialog.lift()
+            dialog.focus_force()
+            if chosen:
+                color_var.set(chosen)
+                update_preview()
+
+        def on_apply() -> None:
+            parsed = self._validate_hex_color(color_var.get())
+            if not parsed:
+                messagebox.showerror("Invalid Color", "Enter a valid hex color like #FF8800.", parent=dialog)
+                return
+            result["hex"] = parsed
+            dialog.destroy()
+
+        def on_cancel() -> None:
+            dialog.destroy()
+
+        button_row = ttk.Frame(dialog)
+        button_row.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 8))
+        ttk.Button(button_row, text="Pick from Screen", command=on_screen_pick).pack(side="left", padx=(0, 4))
+        ttk.Button(button_row, text="Native Picker...", command=on_native_picker).pack(side="left", padx=(0, 8))
+        ttk.Button(button_row, text="Apply", command=on_apply).pack(side="right", padx=(4, 0))
+        ttk.Button(button_row, text="Cancel", command=on_cancel).pack(side="right")
+
+        entry.bind("<KeyRelease>", lambda _e: update_preview())
+        entry.bind("<Return>", lambda _e: on_apply())
+        dialog.bind("<Escape>", lambda _e: on_cancel())
+        update_preview()
+        entry.focus_set()
+        dialog.wait_window()
+        return result["hex"]
 
     def _set_selected_color(self) -> None:
         if self.category_list is None:
@@ -514,7 +696,7 @@ class BoreholeStickApp(ttk.Frame):
         item = self.category_list.item(selected[0])
         category = str(item["values"][0])
         initial = self.palette.get(category, "#808080")
-        _, chosen = colorchooser.askcolor(color=initial, title=f"Pick color for {category}")
+        chosen = self._open_color_editor_dialog(category=category, initial_hex=initial)
         if not chosen:
             return
         self.palette[category] = normalize_hex(chosen)
@@ -566,12 +748,15 @@ class BoreholeStickApp(ttk.Frame):
             thin_min_abs_m = float(self.thin_min_abs_m.get())
             thin_relative_to_median = float(self.thin_relative_to_median.get())
             adjacent_gap_tolerance_m = float(self.adjacent_gap_tolerance_m.get())
+            min_label_length_m = float(self.min_label_length_m.get())
             if thin_min_abs_m < 0:
                 raise ValueError("Thin min abs (m) must be >= 0.")
             if thin_relative_to_median < 0:
                 raise ValueError("Thin relative factor must be >= 0.")
             if adjacent_gap_tolerance_m < 0:
                 raise ValueError("Adjacent gap tolerance (m) must be >= 0.")
+            if min_label_length_m < 0:
+                raise ValueError("Minimum label length (m) must be >= 0.")
 
             collar_mapping = self._get_mapping(
                 self.collar_map_vars, ["hole_id", "easting", "northing", "rl"]
@@ -619,7 +804,7 @@ class BoreholeStickApp(ttk.Frame):
                 projected_holes=projected,
                 collars=collars,
                 smart_filter_enabled=bool(self.smart_label_filter_enabled.get()),
-                density_preset=self.label_density_preset.get(),
+                min_label_length_m=min_label_length_m,
                 thin_filter_enabled=bool(self.thin_filter_enabled.get()),
                 thin_min_abs_m=thin_min_abs_m,
                 thin_relative_to_median=thin_relative_to_median,
@@ -664,7 +849,7 @@ class BoreholeStickApp(ttk.Frame):
             self._log(
                 "Label filter: "
                 f"{'ON' if self.smart_label_filter_enabled.get() else 'OFF'}, "
-                f"preset={self.label_density_preset.get()}"
+                f"min_length_m={min_label_length_m}"
             )
             self._log(
                 "Label advanced: "
