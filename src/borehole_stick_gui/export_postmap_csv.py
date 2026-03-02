@@ -25,6 +25,11 @@ def _safe_computed_name(base: str, existing_cols: set[str]) -> str:
     return name
 
 
+def build_category_class_map(categories: Iterable[str]) -> Dict[str, int]:
+    unique = sorted({str(c).strip() for c in categories if str(c).strip() != ""})
+    return {category: idx + 1 for idx, category in enumerate(unique)}
+
+
 def _build_base_postmap_df(
     lith_df: pd.DataFrame,
     lith_mapping: Dict[str, str],
@@ -47,7 +52,7 @@ def _build_base_postmap_df(
     df = df[df["_hole_id"] != ""].copy()
     df["_from_depth"] = pd.to_numeric(df[from_col], errors="coerce")
     df["_to_depth"] = pd.to_numeric(df[to_col], errors="coerce")
-    df["_category"] = df[classification_field].astype(str).str.strip()
+    df["_category"] = df[classification_field].fillna("").astype(str).str.strip()
     df["_thickness"] = df["_to_depth"] - df["_from_depth"]
 
     valid_interval = df["_to_depth"] > df["_from_depth"]
@@ -77,11 +82,23 @@ def _build_base_postmap_df(
     return df
 
 
-def _add_computed_columns(df: pd.DataFrame, lith_df: pd.DataFrame) -> pd.DataFrame:
+def _add_computed_columns(
+    df: pd.DataFrame,
+    lith_df: pd.DataFrame,
+    class_map: Dict[str, int] | None = None,
+) -> pd.DataFrame:
     out = df.copy()
-    categories = sorted(out["_category"].unique().tolist())
-    class_map = {category: idx + 1 for idx, category in enumerate(categories)}
-    out["class_id"] = out["_category"].map(class_map).astype("int64")
+    resolved_map = dict(class_map or {})
+    if not resolved_map:
+        resolved_map = build_category_class_map(out["_category"].tolist())
+    else:
+        # Keep provided IDs stable; append any missing categories deterministically.
+        next_id = max(resolved_map.values(), default=0) + 1
+        for category in sorted(out["_category"].astype(str).str.strip().unique().tolist()):
+            if category and category not in resolved_map:
+                resolved_map[category] = next_id
+                next_id += 1
+    out["class_id"] = out["_category"].map(resolved_map).astype("int64")
 
     existing = set(lith_df.columns.tolist())
     hole_out = _safe_computed_name("hole_id", existing)
@@ -218,6 +235,7 @@ def build_postmap_dataframes(
     thin_relative_to_median: float = DEFAULT_THIN_RELATIVE_TO_MEDIAN,
     merge_adjacent_enabled: bool = True,
     adjacent_gap_tolerance_m: float = DEFAULT_ADJACENT_GAP_TOLERANCE_M,
+    class_map: Dict[str, int] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     base_df = _build_base_postmap_df(
         lith_df=lith_df,
@@ -226,7 +244,7 @@ def build_postmap_dataframes(
         projected_holes=projected_holes,
         collars=collars,
     )
-    full_df = _add_computed_columns(base_df, lith_df)
+    full_df = _add_computed_columns(base_df, lith_df, class_map=class_map)
 
     if not smart_filter_enabled:
         return full_df, full_df.copy()
@@ -254,7 +272,7 @@ def build_postmap_dataframes(
             idx = hole_rows["_thickness"].idxmax()
             labels_raw = pd.concat([labels_raw, label_candidates.loc[[idx]]], ignore_index=True)
 
-    labels_df = _add_computed_columns(labels_raw, lith_df)
+    labels_df = _add_computed_columns(labels_raw, lith_df, class_map=class_map)
     return full_df, labels_df
 
 
@@ -273,6 +291,7 @@ def write_postmap_csvs(
     thin_relative_to_median: float = DEFAULT_THIN_RELATIVE_TO_MEDIAN,
     merge_adjacent_enabled: bool = True,
     adjacent_gap_tolerance_m: float = DEFAULT_ADJACENT_GAP_TOLERANCE_M,
+    class_map: Dict[str, int] | None = None,
 ) -> Tuple[Path, int, Path, int]:
     full_df, labels_df = build_postmap_dataframes(
         lith_df=lith_df,
@@ -287,6 +306,7 @@ def write_postmap_csvs(
         thin_relative_to_median=thin_relative_to_median,
         merge_adjacent_enabled=merge_adjacent_enabled,
         adjacent_gap_tolerance_m=adjacent_gap_tolerance_m,
+        class_map=class_map,
     )
 
     full_out = Path(full_path)

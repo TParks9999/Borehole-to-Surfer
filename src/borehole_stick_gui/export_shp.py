@@ -1,22 +1,28 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Dict, Iterable
 
 import shapefile
 
 from .models import StickPolygon
 
 
-def write_sticks_shapefile(path: str | Path, polygons: Iterable[StickPolygon]) -> Path:
+def write_sticks_shapefile(
+    path: str | Path,
+    polygons: Iterable[StickPolygon],
+    class_map: Dict[str, int] | None = None,
+) -> Path:
     polygons = list(polygons)
     base_path = Path(path)
     if base_path.suffix.lower() == ".shp":
         base_path = base_path.with_suffix("")
     base_path.parent.mkdir(parents=True, exist_ok=True)
 
-    categories = sorted({poly.category for poly in polygons})
-    class_map = {category: idx + 1 for idx, category in enumerate(categories)}
+    resolved_class_map = dict(class_map or {})
+    if not resolved_class_map:
+        categories = sorted({poly.category for poly in polygons})
+        resolved_class_map = {category: idx + 1 for idx, category in enumerate(categories)}
 
     with shapefile.Writer(str(base_path), shapeType=shapefile.POLYGON) as writer:
         writer.autoBalance = 1
@@ -32,7 +38,7 @@ def write_sticks_shapefile(path: str | Path, polygons: Iterable[StickPolygon]) -
             writer.poly([poly.points])
             writer.record(
                 poly.hole_id,
-                int(class_map[poly.category]),
+                int(resolved_class_map[poly.category]),
                 poly.category[:80],
                 float(poly.x_left),
                 float(poly.x_right),

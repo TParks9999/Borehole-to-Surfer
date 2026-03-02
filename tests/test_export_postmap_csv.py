@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from borehole_stick_gui.export_postmap_csv import write_postmap_csvs
+from borehole_stick_gui.export_postmap_csv import build_category_class_map, write_postmap_csvs
 from borehole_stick_gui.models import CollarRecord, ProjectedHole
 
 
@@ -351,3 +351,39 @@ def test_min_length_filter_has_one_label_per_hole_fallback(tmp_path: Path):
     assert label_rows == 1
     labels_df = pd.read_csv(labels_path)
     assert labels_df["unit"].tolist() == ["u1"]
+
+
+def test_class_id_mapping_stable_between_full_and_labels(tmp_path: Path):
+    lith_df = pd.DataFrame(
+        [
+            {"hole_id": "BH1", "from": 0.0, "to": 2.0, "lithology": "A", "unit": "A1"},
+            {"hole_id": "BH1", "from": 2.0, "to": 2.2, "lithology": "B", "unit": "B1"},
+            {"hole_id": "BH1", "from": 2.2, "to": 8.0, "lithology": "C", "unit": "C1"},
+        ]
+    )
+    lith_mapping = {"hole_id": "hole_id", "from_depth": "from", "to_depth": "to", "lithology": "lithology"}
+    projected = [ProjectedHole("BH1", 0.0, 0.0, 100.0, 0.0, 0.0, True, "ok")]
+    collars = [CollarRecord("BH1", 0.0, 0.0, 100.0)]
+    class_map = build_category_class_map(["A", "B", "C"])
+
+    full_path, _, labels_path, _ = write_postmap_csvs(
+        full_path=tmp_path / "full.csv",
+        labels_path=tmp_path / "labels.csv",
+        lith_df=lith_df,
+        lith_mapping=lith_mapping,
+        classification_field="lithology",
+        projected_holes=projected,
+        collars=collars,
+        smart_filter_enabled=True,
+        min_label_length_m=1.0,
+        thin_filter_enabled=False,
+        merge_adjacent_enabled=False,
+        class_map=class_map,
+    )
+
+    full_df = pd.read_csv(full_path)
+    labels_df = pd.read_csv(labels_path)
+    full_pairs = dict(zip(full_df["category"], full_df["class_id"]))
+    labels_pairs = dict(zip(labels_df["category"], labels_df["class_id"]))
+    assert full_pairs["A"] == labels_pairs["A"]
+    assert full_pairs["C"] == labels_pairs["C"]

@@ -1,0 +1,10 @@
+classification_column,category,color_hex
+lithology,TOPSOIL,#9B7653
+lithology,SANDSTONE,#E7C66A
+lithology,SILTSTONE,#8A8F99
+lithology,CLAYSTONE,#A56545
+lithology,GRAVEL,#C9AE82
+lithology,COAL,#2B2B2B
+lithology,BASALT,#4B5563
+lithology,DOLERITE,#344154
+lithology,RHYOLITE,#C97A5A
