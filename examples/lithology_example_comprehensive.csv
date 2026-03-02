@@ -1,0 +1,79 @@
+hole_id,from_depth,to_depth,lithology,unit,alteration,recovery_pct,rqd_pct,comments
+BH001,0.0,0.3,TOPSOIL,TS,Nil,70,0,Organics and loose roots
+BH001,0.3,2.4,SANDSTONE,SS1,Weak FeOx,92,78,Fine to medium grained
+BH001,2.4,2.6,SILTSTONE,SI1,Nil,88,65,Thin bed
+BH001,2.6,6.0,SILTSTONE,SI2,Minor clay,90,72,Massive grey siltstone
+BH001,6.0,8.5,CLAYSTONE,CL1,Moderate clay,85,45,Soft plastic seams
+BH001,8.5,12.0,SANDSTONE,SS2,Weak FeOx,94,80,Becoming competent
+BH001,12.0,12.0,CLAYSTONE,CLX,Moderate clay,80,30,Invalid zero-thickness interval for QA
+BH001,12.0,18.5,BASALT,BA1,Silicified,98,90,Fresh basalt to EOH
+BH002,0.0,1.0,TOPSOIL,TS,Nil,68,0,Colluvium
+BH002,1.0,4.2,CLAYSTONE,CL1,Moderate clay,82,35,Brown and fissile
+BH002,4.2,7.7,SILTSTONE,SI1,Nil,90,70,Grey laminated siltstone
+BH002,7.7,11.3,SANDSTONE,SS1,Weak FeOx,93,76,Fine sandstone with mica
+BH002,11.3,11.5,SILTSTONE,SIX,Nil,86,60,Thin marker bed
+BH002,11.5,18.0,SANDSTONE,SS2,Weak FeOx,95,82,Medium grained
+BH002,18.0,22.0,BASALT,BA1,Propylitic,97,88,Basalt with minor veins
+BH003,0.0,0.8,TOPSOIL,TS,Nil,65,0,Silty topsoil
+BH003,0.8,3.0,SANDSTONE,SS1,Weak FeOx,91,75,Weathered top
+BH003,3.0,3.1,COAL,CO1,Nil,72,15,Thin coal streak
+BH003,3.1,6.4,SILTSTONE,SI2,Nil,89,68,Interbedded siltstone
+BH003,6.4,9.0,CLAYSTONE,CL2,Moderate clay,84,42,Dark grey claystone
+BH003,9.0,12.5,SANDSTONE,SS2,Weak FeOx,94,79,Competent sandstone
+BH003,12.5,16.0,BASALT,BA1,Propylitic,96,87,Fresh basalt
+BH004,0.0,1.3,TOPSOIL,TS,Nil,67,0,Residual clay
+BH004,1.3,5.0,CLAYSTONE,CL1,Strong clay,80,30,Highly weathered interval
+BH004,5.0,8.6,SILTSTONE,SI1,Minor chlorite,88,62,Laminated siltstone
+BH004,8.6,14.8,SANDSTONE,SS2,Weak FeOx,93,77,Massive sandstone
+BH004,14.8,15.0,GRAVEL,GV1,Nil,75,10,Thin gravel lens
+BH004,15.0,20.0,SANDSTONE,SS3,Silicified,95,84,Hard quartz-rich unit
+BH004,20.0,25.4,BASALT,BA1,Propylitic,97,89,Fresh to slightly fractured
+BH004,25.4,30.0,DOLERITE,DO1,Chloritic,96,85,Dolerite dyke at base
+BH005,0.0,0.5,TOPSOIL,TS,Nil,60,0,Loose surface material
+BH005,0.5,2.7,CLAYSTONE,CL1,Strong clay,78,25,Very soft claystone
+BH005,2.7,6.8,SILTSTONE,SI1,Nil,87,58,Silty laminated sequence
+BH005,6.8,9.2,SANDSTONE,SS1,Weak FeOx,90,70,Fine sandstone
+BH005,9.2,9.1,SANDSTONE,SSX,Weak FeOx,90,70,Invalid reversed interval for QA
+BH005,9.2,12.0,SANDSTONE,SS2,Weak FeOx,92,74,Moderately strong sandstone
+BH006,0.0,0.4,TOPSOIL,TS,Nil,66,0,Thin topsoil
+BH006,0.4,4.5,SILTSTONE,SI1,Minor chlorite,89,64,Silty mudstone transition
+BH006,4.5,10.0,SANDSTONE,SS2,Silicified,95,81,Thick competent sandstone
+BH006,10.0,15.2,BASALT,BA1,Propylitic,97,88,Basalt with sparse vesicles
+BH006,15.2,19.8,DOLERITE,DO1,Chloritic,96,86,Dolerite
+BH006,19.8,22.4,SILTSTONE,SI2,Nil,90,69,Return to sedimentary package
+BH006,22.4,26.0,SANDSTONE,SS3,Silicified,94,83,EOH sandstone
+BH007,0.0,0.2,TOPSOIL,TS,Nil,58,0,Very thin topsoil
+BH007,0.2,3.8,CLAYSTONE,CL1,Strong clay,79,28,Plastic claystone
+BH007,3.8,6.1,SILTSTONE,SI1,Nil,88,61,Siltstone
+BH007,6.1,11.4,SANDSTONE,SS2,Weak FeOx,93,78,Sandstone with thin laminations
+BH007,11.4,16.0,COAL,CO2,Nil,73,18,Coal package
+BH007,16.0,20.4,SANDSTONE,SS3,Silicified,95,84,Hard sandstone
+BH007,20.4,28.6,BASALT,BA1,Propylitic,97,89,Basalt sequence
+BH007,28.6,33.5,DOLERITE,DO1,Chloritic,96,85,Dolerite sill
+BH007,33.5,40.0,BASALT,BA2,Propylitic,98,90,Massive basalt to EOH
+BH008,0.0,0.6,TOPSOIL,TS,Nil,62,0,Sandy topsoil
+BH008,0.6,2.2,GRAVEL,GV1,Nil,76,12,Gravelly lag
+BH008,2.2,5.9,SANDSTONE,SS1,Weak FeOx,91,73,Fine-medium sandstone
+BH008,5.9,9.5,SILTSTONE,SI2,Nil,89,66,Interbedded siltstone
+BH008,9.5,14.0,SANDSTONE,SS2,Silicified,94,80,Competent sandstone
+BH008,14.0,18.5,BASALT,BA1,Propylitic,97,88,Basalt
+BH008,18.5,24.0,DOLERITE,DO1,Chloritic,96,86,Dolerite
+BH008,24.0,28.2,BASALT,BA2,Propylitic,98,91,Massive basalt
+BH008,28.2,35.0,RHYOLITE,RH1,Silicified,95,82,Rhyolite at depth
+BH009,0.0,0.7,TOPSOIL,TS,Nil,64,0,Topsoil
+BH009,0.7,3.4,CLAYSTONE,CL1,Moderate clay,81,33,Weathered claystone
+BH009,3.4,7.8,SILTSTONE,SI1,Nil,88,63,Siltstone
+BH009,7.8,13.6,SANDSTONE,SS2,Weak FeOx,93,78,Sandstone
+BH009,13.6,17.9,BASALT,BA1,Propylitic,97,88,Basalt
+BH009,17.9,22.5,DOLERITE,DO1,Chloritic,96,86,Dolerite
+BH009,22.5,28.0,RHYOLITE,RH1,Silicified,95,83,Rhyolite to EOH
+BH010,0.0,0.5,TOPSOIL,TS,Nil,63,0,Surface material
+BH010,0.5,3.0,SANDSTONE,SS1,Weak FeOx,90,72,Sandy weathered zone
+BH010,3.0,6.8,SILTSTONE,SI1,Nil,88,62,Siltstone
+BH010,6.8,12.6,SANDSTONE,SS2,Silicified,94,81,Thick sandstone
+BH010,12.6,18.0,COAL,CO2,Nil,74,20,Coal seam package
+BH010,18.0,24.2,BASALT,BA1,Propylitic,97,88,Basalt
+BH010,24.2,31.7,DOLERITE,DO1,Chloritic,96,86,Dolerite
+BH010,31.7,38.5,BASALT,BA2,Propylitic,98,90,Basalt flow
+BH010,38.5,45.0,RHYOLITE,RH1,Silicified,95,84,Rhyolite at base
+BH999,0.0,1.0,SANDSTONE,SSX,Weak FeOx,90,70,No matching collar record by design
