@@ -33,6 +33,7 @@ Thumbs.db
 
 # Generated outputs
 Outputs/
+Bremer example/
 *.srf
 *.bln
 *.shp

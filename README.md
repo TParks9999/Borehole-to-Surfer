@@ -25,6 +25,7 @@ It provides a practical workflow for geologists and engineers:
 - Borehole section workflow in a single GUI.
 - Flexible column mapping for collar and lithology CSVs.
 - Line definition by direct input or line CSV import.
+- Optional reversed-chainage Surfer output for profiles that should read right-to-left.
 - Right-side map preview with:
   - collar points + `hole_id` labels
   - `P1`/`P2` markers and section line
@@ -80,6 +81,7 @@ The launcher prefers a local `.venv` and will install requirements if needed.
    - `Max Off-Line Distance (m)`
    - `Stick Width (m)`
    - `Classification Column`
+   - `Reverse profile chainage in Surfer` when the section should read right-to-left
 4. Review the map panel to confirm included/excluded holes.
 5. Configure label filtering options.
 6. Choose output folder + base name.
@@ -105,6 +107,8 @@ point,easting,northing,chainage
 P1,499980.0,6999990.0,0.0
 P2,500420.0,7000152.0,468.9
 ```
+
+For reversed profiles, keep the `P1`/`P2` coordinates and chainages truthful to the section line, then enable `Reverse profile chainage in Surfer` in the app. The exported runner will reverse the Surfer X axis automatically.
 
 ## Example Data
 
@@ -162,5 +166,6 @@ Output:
 ## Troubleshooting
 
 - If Surfer does not auto-open, run `*_run_surfer_autoload.bat` manually.
+- If a profile needs chainage to increase from right to left, enable `Reverse profile chainage in Surfer` before export.
 - If no holes appear in the map or exports, check collar mapping (`hole_id`, `easting`, `northing`, `rl`).
 - If labels are sparse, relax smart label filtering thresholds.

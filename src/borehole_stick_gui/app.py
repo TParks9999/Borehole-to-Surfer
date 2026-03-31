@@ -58,6 +58,7 @@ def validate_run_inputs(
     collar_df: pd.DataFrame,
     lith_df: pd.DataFrame,
     collar_hole_col: str,
+    lith_hole_col: str,
     classification_col: str,
     max_offset_m: float,
 ) -> None:
@@ -76,6 +77,26 @@ def validate_run_inputs(
         extra = f" (+{len(missing_rows) - 10} more)" if len(missing_rows) > 10 else ""
         raise ValueError(
             f"Missing values in classification column '{classification_col}' at CSV rows: {sample_rows}{extra}"
+        )
+
+    if lith_hole_col not in lith_df.columns:
+        raise ValueError(f"Lithology hole ID column not found in CSV: {lith_hole_col}")
+
+    collar_hole_ids = {
+        str(value).strip()
+        for value in collar_df[collar_hole_col].fillna("").astype(str).tolist()
+        if str(value).strip()
+    }
+    lith_hole_ids = {
+        str(value).strip()
+        for value in lith_df[lith_hole_col].fillna("").astype(str).tolist()
+        if str(value).strip()
+    }
+    if collar_hole_ids and lith_hole_ids and not (collar_hole_ids & lith_hole_ids):
+        raise ValueError(
+            "No matching hole IDs were found between the collar CSV and lithology CSV. "
+            "Check the lithology hole_id mapping; it should be the borehole ID column "
+            "(for example 'Location ID'), not the classification column."
         )
 
 
@@ -137,6 +158,7 @@ class BoreholeStickApp(ttk.Frame):
 
         self.max_offset = StringVar(value="25")
         self.rect_width = StringVar(value="2")
+        self.reverse_chainage = BooleanVar(value=False)
         self.smart_label_filter_enabled = BooleanVar(value=True)
         self.min_label_length_m = StringVar(value="1.0")
         self.thin_filter_enabled = BooleanVar(value=True)
@@ -252,6 +274,7 @@ class BoreholeStickApp(ttk.Frame):
             value = data.get(key)
             if isinstance(value, str):
                 var.set(value)
+        self.reverse_chainage.set(bool(data.get("reverse_chainage", False)))
         self.smart_label_filter_enabled.set(bool(data.get("smart_label_filter_enabled", True)))
         self.thin_filter_enabled.set(bool(data.get("thin_filter_enabled", True)))
         self.merge_adjacent_enabled.set(bool(data.get("merge_adjacent_enabled", True)))
@@ -280,6 +303,7 @@ class BoreholeStickApp(ttk.Frame):
             "max_offset": self.max_offset.get(),
             "rect_width": self.rect_width.get(),
             "category_field": self.category_field.get(),
+            "reverse_chainage": bool(self.reverse_chainage.get()),
             "smart_label_filter_enabled": bool(self.smart_label_filter_enabled.get()),
             "min_label_length_m": self.min_label_length_m.get(),
             "thin_filter_enabled": bool(self.thin_filter_enabled.get()),
@@ -326,6 +350,7 @@ class BoreholeStickApp(ttk.Frame):
         self.p2_ch.set("100")
         self.max_offset.set("25")
         self.rect_width.set("2")
+        self.reverse_chainage.set(False)
         self.smart_label_filter_enabled.set(True)
         self.min_label_length_m.set("1.0")
         self.thin_filter_enabled.set(True)
@@ -408,6 +433,17 @@ class BoreholeStickApp(ttk.Frame):
         ttk.Button(line_frame, text="Load Line CSV", command=self._load_line_csv).grid(
             row=2, column=0, columnspan=6, sticky="e", pady=(4, 0)
         )
+        reverse_chainage_check = ttk.Checkbutton(
+            line_frame,
+            text="Reverse profile chainage in Surfer",
+            variable=self.reverse_chainage,
+            command=self._save_settings,
+        )
+        reverse_chainage_check.grid(row=3, column=0, columnspan=6, sticky="w", pady=(6, 0))
+        ttk.Label(
+            line_frame,
+            text="Use for sections that should read right-to-left on the Surfer profile.",
+        ).grid(row=4, column=0, columnspan=6, sticky="w", pady=(2, 0))
 
         options_frame = ttk.LabelFrame(container, text="Options")
         options_frame.grid(row=2, column=0, sticky="ew", padx=2, pady=2)
@@ -1113,6 +1149,7 @@ class BoreholeStickApp(ttk.Frame):
                 collar_df=self.collar_df,
                 lith_df=self.lith_df,
                 collar_hole_col=collar_mapping["hole_id"],
+                lith_hole_col=lith_mapping["hole_id"],
                 classification_col=category_field,
                 max_offset_m=max_offset_m,
             )
@@ -1124,6 +1161,12 @@ class BoreholeStickApp(ttk.Frame):
             line = self._line_definition()
             projected = project_collar_records(collars, line, max_offset_m)
             included_holes = {hole.hole_id for hole in projected if hole.included}
+            matched_included_holes = {item.hole_id for item in valid_lith if item.hole_id in included_holes}
+            if included_holes and not matched_included_holes:
+                raise ValueError(
+                    "No lithology intervals match the included holes. "
+                    "Check the lithology hole_id mapping and confirm the section line / max offset include the intended boreholes."
+                )
 
             category_values = [item.category for item in valid_lith if item.hole_id in included_holes]
             if not category_values:
@@ -1179,6 +1222,7 @@ class BoreholeStickApp(ttk.Frame):
                 postmap_csv_path=postmap_labels_path,
                 label_field=category_field,
                 out_srf_path=out_srf_path,
+                reverse_chainage=bool(self.reverse_chainage.get()),
             )
             surfer_bat_path = write_surfer_autoload_bat(
                 path=surfer_bat_path,
@@ -1188,6 +1232,7 @@ class BoreholeStickApp(ttk.Frame):
                 postmap_csv_path=postmap_labels_path,
                 label_field=category_field,
                 out_srf_path=out_srf_path,
+                reverse_chainage=bool(self.reverse_chainage.get()),
             )
 
             if self.survey_df is not None:
@@ -1209,6 +1254,14 @@ class BoreholeStickApp(ttk.Frame):
             self._log("SHP includes numeric CLASS_ID field for Surfer Classed Colors.")
             self._log(f"PostMap CSV (full): {postmap_path}")
             self._log(f"PostMap CSV (labels): {postmap_labels_path}")
+            self._log(
+                "Profile chainage orientation: "
+                f"{'reversed in Surfer output' if self.reverse_chainage.get() else 'standard left-to-right'}"
+            )
+            if self.reverse_chainage.get():
+                self._log(
+                    "Note: Manual SHP/PostMap imports outside the generated runner still need the Surfer X axis reversed."
+                )
             self._log(
                 "Label filter: "
                 f"{'ON' if self.smart_label_filter_enabled.get() else 'OFF'}, "
