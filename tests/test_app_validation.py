@@ -12,6 +12,7 @@ def test_validate_run_inputs_rejects_negative_offset():
             collar_df=collar_df,
             lith_df=lith_df,
             collar_hole_col="hole_id",
+            lith_hole_col="hole_id",
             classification_col="lithology",
             max_offset_m=-0.1,
         )
@@ -25,6 +26,7 @@ def test_validate_run_inputs_rejects_duplicate_collars():
             collar_df=collar_df,
             lith_df=lith_df,
             collar_hole_col="hole_id",
+            lith_hole_col="hole_id",
             classification_col="lithology",
             max_offset_m=25.0,
         )
@@ -38,7 +40,26 @@ def test_validate_run_inputs_rejects_missing_classification_values():
             collar_df=collar_df,
             lith_df=lith_df,
             collar_hole_col="hole_id",
+            lith_hole_col="hole_id",
             classification_col="lithology",
             max_offset_m=25.0,
         )
 
+
+def test_validate_run_inputs_rejects_non_overlapping_hole_ids():
+    collar_df = pd.DataFrame({"hole_id": ["BH1", "BH2"]})
+    lith_df = pd.DataFrame(
+        {
+            "hole_id": ["CLAY", "SAND"],
+            "lithology": ["CLAY", "SAND"],
+        }
+    )
+    with pytest.raises(ValueError, match="No matching hole IDs were found"):
+        validate_run_inputs(
+            collar_df=collar_df,
+            lith_df=lith_df,
+            collar_hole_col="hole_id",
+            lith_hole_col="hole_id",
+            classification_col="lithology",
+            max_offset_m=25.0,
+        )

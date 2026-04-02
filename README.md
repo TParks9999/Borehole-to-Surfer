@@ -1,104 +1,114 @@
-﻿# Borehole to Surfer
+# Borehole to Surfer
 
-Borehole to Surfer is a Windows desktop tool for turning borehole CSV data into Surfer-ready section outputs.
+Borehole to Surfer is a Windows desktop application for converting borehole CSV data into section outputs that can be loaded directly into Golden Software Surfer.
 
-It provides a practical workflow for geologists and engineers:
-- load collar + lithology data
-- define a section line (`P1`/`P2`)
-- preview spatial context in an in-app map
-- export files that can be styled and opened in Surfer with minimal manual steps
+It is designed for a practical geology and engineering workflow:
+
+- load collar and lithology tables
+- define a section line with chainage
+- review borehole inclusion in an in-app map
+- export Surfer-ready files with minimal manual cleanup
+
+## Status
+
+This repository is intended for public source control and active development. Generated outputs, local settings, virtual environments, and build artifacts are intentionally excluded from version control.
 
 ## Screenshots
 
-### App Window
+### Application
 ![Borehole to Surfer window](docs/images/app-window.png)
 
-### Surfer Output Example
+### Surfer Output
 ![Surfer output example](docs/images/surfer-output-example.png)
 
-> Add your two images at:
-> - `docs/images/app-window.png`
-> - `docs/images/surfer-output-example.png`
+## Key Features
 
-## Features
+- Single-window workflow for borehole section preparation
+- Flexible collar and lithology column mapping
+- Section line entry by coordinates or CSV import
+- Map preview showing collars, section line, corridor, and included or excluded holes
+- Optional satellite basemap preview
+- Reverse-chainage support for sections that need to read right-to-left in Surfer
+- Smart label filtering for cleaner interval labels
+- Optional borehole name label export
+- Automatic export of Surfer support files, including a runner batch file
 
-- Borehole section workflow in a single GUI.
-- Flexible column mapping for collar and lithology CSVs.
-- Line definition by direct input or line CSV import.
-- Right-side map preview with:
-  - collar points + `hole_id` labels
-  - `P1`/`P2` markers and section line
-  - max off-line corridor overlay
-  - included vs excluded borehole visibility
-- Smart label filtering for cleaner Surfer labels.
-- Exports:
-  - Shapefile (`.shp/.shx/.dbf/.prj`)
-  - BLN polygons (`.bln`)
-  - PostMap CSVs (`*_postmap.csv`, `*_postmap_labels.csv`)
-  - Palette CSV (`*_palette.csv`)
-  - QA CSV (`*_qa.csv`)
-  - Surfer auto-load script + runner BAT
+## Outputs
+
+For a base name such as `borehole_sticks`, the application generates:
+
+- `borehole_sticks.shp` with companion `.shx`, `.dbf`, and `.prj`
+- `borehole_sticks.bln`
+- `borehole_sticks_postmap.csv`
+- `borehole_sticks_postmap_labels.csv`
+- `borehole_sticks_postmap_borehole_names.csv`
+- `borehole_sticks_palette.csv`
+- `borehole_sticks_qa.csv`
+- `borehole_sticks_surfer_autoload.py`
+- `borehole_sticks_run_surfer_autoload.bat`
 
 ## Requirements
 
 - Windows
-- Python 3.10+
+- Python 3.10 or later
+- Golden Software Surfer for the generated auto-load workflow
 
-Install dependencies:
+## Installation
+
+Install runtime dependencies:
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
-## Quick Start
+Install development and test dependencies:
 
-### Run from source
+```powershell
+python -m pip install -r requirements-dev.txt
+```
+
+Editable install for local development:
+
+```powershell
+python -m pip install -e .
+```
+
+## Running the Application
+
+Run the application directly:
 
 ```powershell
 python borehole_stick_gui.py
 ```
 
-Alternative:
-
-```powershell
-python -m src.borehole_stick_gui
-```
-
-### Run with launcher BAT
+Or use the included Windows launcher:
 
 ```powershell
 run_borehole_stick_gui.bat
 ```
 
-The launcher prefers a local `.venv` and will install requirements if needed.
+The launcher prefers a local `.venv`, creates one if needed, and installs runtime dependencies automatically.
 
 ## Typical Workflow
 
-1. Load `Collar CSV` and `Lithology CSV`.
-2. Define section line using `P1`/`P2` fields or `Load Line CSV`.
-3. Set:
-   - `Max Off-Line Distance (m)`
-   - `Stick Width (m)`
-   - `Classification Column`
-4. Review the map panel to confirm included/excluded holes.
-5. Configure label filtering options.
-6. Choose output folder + base name.
-7. Click `Generate Outputs`.
+1. Load the collar CSV and lithology CSV.
+2. Define the section line using the `P1` and `P2` fields or import a line CSV.
+3. Select the classification column in `Column Mapping`.
+4. Set section parameters such as maximum off-line distance, stick width, and label sizing.
+5. Review the map panel to confirm the correct holes are included.
+6. Choose an output folder and base name.
+7. Generate outputs and open the Surfer runner if required.
 
 ## Input Data
 
-### Required
+### Required files
 
 - Collar CSV
 - Lithology CSV
 
-### Optional
+### Optional line CSV
 
-- Survey CSV (currently reserved/ignored)
-
-### Line CSV format (optional)
-
-Use columns:
+If you prefer to load the section line from a file, use the following columns:
 
 ```csv
 point,easting,northing,chainage
@@ -106,61 +116,59 @@ P1,499980.0,6999990.0,0.0
 P2,500420.0,7000152.0,468.9
 ```
 
-## Example Data
+For reversed profiles, keep the `P1` and `P2` coordinates and chainages true to the section direction, then enable `Reverse profile chainage in Surfer` in the application.
 
-In `examples/`:
+## Example Files
 
-- Simple templates:
-  - `collar_template.csv`
-  - `lithology_template.csv`
-  - `palette_template.csv`
-- Comprehensive testing set:
-  - `collar_example_comprehensive.csv`
-  - `lithology_example_comprehensive.csv`
-  - `palette_example_comprehensive.csv`
-  - `line_example_comprehensive.csv`
+The `examples/` folder includes:
 
-## Outputs
+- `collar_template.csv`
+- `lithology_template.csv`
+- `palette_template.csv`
+- `collar_example_comprehensive.csv`
+- `lithology_example_comprehensive.csv`
+- `palette_example_comprehensive.csv`
+- `line_example_comprehensive.csv`
 
-For base name `borehole_sticks`, generated files include:
+## Development
 
-- `borehole_sticks.shp` (+ `.shx/.dbf/.prj`)
-- `borehole_sticks.bln`
-- `borehole_sticks_postmap.csv`
-- `borehole_sticks_postmap_labels.csv`
-- `borehole_sticks_palette.csv`
-- `borehole_sticks_qa.csv`
-- `borehole_sticks_surfer_autoload.py`
-- `borehole_sticks_run_surfer_autoload.bat`
-
-## Testing
-
-Run tests:
+Run the test suite:
 
 ```powershell
 python -m pytest -q
 ```
 
-## Build EXE
+Build the standalone executable:
 
 ```powershell
 python -m PyInstaller --noconfirm --onefile --windowed --name BoreholeToSurfer --exclude-module PyQt5 --exclude-module PyQt6 --exclude-module PySide2 --exclude-module PySide6 borehole_stick_gui.py
 ```
 
-Output:
+The executable is written to `dist/BoreholeToSurfer.exe`.
 
-- `dist/BoreholeToSurfer.exe`
+## Repository Layout
 
-## Project Structure
-
-- `borehole_stick_gui.py` - launcher
-- `src/borehole_stick_gui/` - app source
+- `borehole_stick_gui.py` - root launcher
+- `src/borehole_stick_gui/` - application source
 - `tests/` - automated tests
-- `examples/` - sample datasets
-- `Outputs/` - generated output examples
+- `examples/` - sample and template CSV files
+- `docs/images/` - screenshots used in documentation
+
+## Contributing
+
+Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, and pull request expectations.
+
+## Security
+
+If you find a vulnerability, follow the reporting guidance in [SECURITY.md](SECURITY.md) instead of opening a public issue first.
+
+## License
+
+No license file has been added yet. Choose and add a license before publishing if you want others to have explicit rights to use, modify, or redistribute this code.
 
 ## Troubleshooting
 
-- If Surfer does not auto-open, run `*_run_surfer_autoload.bat` manually.
-- If no holes appear in the map or exports, check collar mapping (`hole_id`, `easting`, `northing`, `rl`).
-- If labels are sparse, relax smart label filtering thresholds.
+- If Surfer does not open automatically, run `*_run_surfer_autoload.bat` manually.
+- If no holes appear in the map or exports, recheck collar column mapping for `hole_id`, `easting`, `northing`, and `rl`.
+- If the section orientation is backwards in Surfer, enable `Reverse profile chainage in Surfer` before export.
+- If interval labels are too dense or too sparse, adjust the label filtering settings.

@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from borehole_stick_gui.export_postmap_csv import build_category_class_map, write_postmap_csvs
+from borehole_stick_gui.export_postmap_csv import (
+    build_borehole_name_postmap_dataframe,
+    build_category_class_map,
+    write_postmap_csvs,
+)
 from borehole_stick_gui.models import CollarRecord, ProjectedHole
 
 
@@ -387,3 +391,23 @@ def test_class_id_mapping_stable_between_full_and_labels(tmp_path: Path):
     labels_pairs = dict(zip(labels_df["category"], labels_df["class_id"]))
     assert full_pairs["A"] == labels_pairs["A"]
     assert full_pairs["C"] == labels_pairs["C"]
+
+
+def test_borehole_name_postmap_dataframe_has_one_row_per_included_hole():
+    projected = [
+        ProjectedHole("BH1", 0.0, 0.0, 100.0, 25.0, 0.0, True, "ok"),
+        ProjectedHole("BH2", 0.0, 0.0, 98.0, 45.0, 3.0, True, "ok"),
+        ProjectedHole("BH3", 0.0, 0.0, 96.0, 60.0, 30.0, False, "offset>25"),
+    ]
+    collars = [
+        CollarRecord("BH1", 0.0, 0.0, 100.0),
+        CollarRecord("BH2", 0.0, 0.0, 98.0),
+        CollarRecord("BH3", 0.0, 0.0, 96.0),
+    ]
+
+    df = build_borehole_name_postmap_dataframe(projected_holes=projected, collars=collars, label_offset_m=1.5)
+
+    assert df["hole_id"].tolist() == ["BH1", "BH2"]
+    assert df["chainage"].tolist() == [25.0, 45.0]
+    assert df["elevation_ground"].tolist() == [100.0, 98.0]
+    assert df["elevation_label"].tolist() == [101.5, 99.5]

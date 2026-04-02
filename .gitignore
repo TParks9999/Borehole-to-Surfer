@@ -2,9 +2,12 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
+pip-wheel-metadata/
 
 # Test/cache tooling
 .pytest_cache/
+.pytest_tmp/
 .mypy_cache/
 .ruff_cache/
 .coverage
@@ -13,9 +16,11 @@ htmlcov/
 
 # Virtual environments
 .venv/
+.venv*/
 venv/
 env/
 ENV/
+.python-version
 
 # Build/package artifacts
 build/
@@ -28,11 +33,18 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Local environment files
+.env
+.env.*
+*.local
+*.log
+
 # Local app settings
 .borehole_stick_gui_settings.json
 
 # Generated outputs
 Outputs/
+Bremer example/
 *.srf
 *.bln
 *.shp

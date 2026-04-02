@@ -6,17 +6,31 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import threading
 from tkinter import BooleanVar, Canvas, END, Label, StringVar, Tk, Toplevel, colorchooser, filedialog, messagebox
 from tkinter import ttk
 from typing import Any
 
 import pandas as pd
+from PIL import ImageTk
 
+from .basemap import BasemapImage, load_world_imagery
 from .export_bln import write_bln
-from .export_postmap_csv import build_category_class_map, write_postmap_csvs
+from .export_postmap_csv import (
+    build_category_class_map,
+    write_borehole_name_postmap_csv,
+    write_postmap_csvs,
+)
 from .export_qa import write_qa_csv
 from .export_shp import write_sticks_shapefile
-from .export_surfer_autoload import write_surfer_autoload_bat, write_surfer_autoload_script
+from .export_surfer_autoload import (
+    AUTO_FIT_SCALE_MODE,
+    MANUAL_SCALE_MODE,
+    normalize_scale_mode,
+    write_surfer_autoload_bat,
+    write_surfer_autoload_script,
+)
+from .geo import transform_points, validate_hemisphere, validate_utm_zone
 from .geometry import project_collar_records
 from .io_csv import (
     detect_mapping,
@@ -30,10 +44,12 @@ from .io_csv import (
 )
 from .models import LineDefinition, LinePoint
 from .map_view import (
+    MapTransform,
     compute_extent,
     corridor_polygon_for_extent,
     expand_extent,
     fit_transform,
+    transform_screen_rect,
     world_to_screen,
 )
 from .palette import ensure_palette, load_palette_csv, normalize_hex, save_palette_csv
@@ -58,6 +74,7 @@ def validate_run_inputs(
     collar_df: pd.DataFrame,
     lith_df: pd.DataFrame,
     collar_hole_col: str,
+    lith_hole_col: str,
     classification_col: str,
     max_offset_m: float,
 ) -> None:
@@ -76,6 +93,26 @@ def validate_run_inputs(
         extra = f" (+{len(missing_rows) - 10} more)" if len(missing_rows) > 10 else ""
         raise ValueError(
             f"Missing values in classification column '{classification_col}' at CSV rows: {sample_rows}{extra}"
+        )
+
+    if lith_hole_col not in lith_df.columns:
+        raise ValueError(f"Lithology hole ID column not found in CSV: {lith_hole_col}")
+
+    collar_hole_ids = {
+        str(value).strip()
+        for value in collar_df[collar_hole_col].fillna("").astype(str).tolist()
+        if str(value).strip()
+    }
+    lith_hole_ids = {
+        str(value).strip()
+        for value in lith_df[lith_hole_col].fillna("").astype(str).tolist()
+        if str(value).strip()
+    }
+    if collar_hole_ids and lith_hole_ids and not (collar_hole_ids & lith_hole_ids):
+        raise ValueError(
+            "No matching hole IDs were found between the collar CSV and lithology CSV. "
+            "Check the lithology hole_id mapping; it should be the borehole ID column "
+            "(for example 'Location ID'), not the classification column."
         )
 
 
@@ -105,26 +142,29 @@ class BoreholeStickApp(ttk.Frame):
         self.root.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
+        self.rowconfigure(1, weight=0)
 
         self._canvas: Canvas | None = None
         self._vscroll: ttk.Scrollbar | None = None
         self._content: ttk.Frame | None = None
         self._canvas_window_id = -1
         self._main_split: ttk.Frame | None = None
+        self._right_host: ttk.Frame | None = None
+        self._right_controls: ttk.LabelFrame | None = None
         self.map_canvas: Canvas | None = None
         self._map_after_id: str | None = None
         self._map_padding_px = 20
         self._map_buffer_ratio = 0.05
+        self._satellite_map_buffer_ratio = 0.20
         self._line_entries: list[ttk.Entry] = []
         self._max_offset_entry: ttk.Entry | None = None
+        self._surfer_manual_scale_entry: ttk.Entry | None = None
 
         self.collar_df: pd.DataFrame | None = None
         self.lith_df: pd.DataFrame | None = None
-        self.survey_df: pd.DataFrame | None = None
 
         self.collar_path = StringVar()
         self.lith_path = StringVar()
-        self.survey_path = StringVar()
         self.output_dir = StringVar(value=str(Path.cwd()))
         self.output_base = StringVar(value="borehole_sticks")
 
@@ -137,6 +177,15 @@ class BoreholeStickApp(ttk.Frame):
 
         self.max_offset = StringVar(value="25")
         self.rect_width = StringVar(value="2")
+        self.utm_zone = StringVar()
+        self.utm_hemisphere = StringVar()
+        self.reverse_chainage = BooleanVar(value=False)
+        self.show_satellite_basemap = BooleanVar(value=True)
+        self.show_borehole_names = BooleanVar(value=True)
+        self.interval_label_size = StringVar(value="8")
+        self.borehole_name_label_size = StringVar(value="10")
+        self.surfer_scale_mode = StringVar(value=AUTO_FIT_SCALE_MODE)
+        self.surfer_manual_scale = StringVar(value="50")
         self.smart_label_filter_enabled = BooleanVar(value=True)
         self.min_label_length_m = StringVar(value="1.0")
         self.thin_filter_enabled = BooleanVar(value=True)
@@ -150,17 +199,28 @@ class BoreholeStickApp(ttk.Frame):
 
         self.collar_map_vars: dict[str, StringVar] = {}
         self.lith_map_vars: dict[str, StringVar] = {}
+        self.category_combo: ttk.Combobox | None = None
         self.category_list: ttk.Treeview | None = None
         self.log_box: ttk.Treeview | None = None
         self._label_filter_widgets: list[ttk.Widget] = []
 
         self.settings_path = Path.home() / ".borehole_stick_gui_settings.json"
+        self._basemap_cache_dir = Path.home() / ".borehole_stick_gui_cache" / "esri_world_imagery"
+        self._basemap_photo: ImageTk.PhotoImage | None = None
+        self._basemap_image_key: tuple[Any, ...] | None = None
+        self._basemap_pending_key: tuple[Any, ...] | None = None
+        self._basemap_failed_key: tuple[Any, ...] | None = None
+        self._basemap_failed_status: str | None = None
+        self._basemap_status: str | None = None
+        self._basemap_attribution: str | None = None
+        self._basemap_request_seq = 0
         self._saved_collar_mapping: dict[str, str] = {}
         self._saved_lith_mapping: dict[str, str] = {}
         self._load_settings()
 
         self._init_scroll_container()
         self._build_ui()
+        self._build_footer()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._autoload_recent_files()
 
@@ -191,8 +251,13 @@ class BoreholeStickApp(ttk.Frame):
         self._content.bind("<Enter>", self._bind_mousewheel)
         self._content.bind("<Leave>", self._unbind_mousewheel)
 
-        map_frame = ttk.LabelFrame(self._main_split, text="Map View")
-        map_frame.grid(row=0, column=1, sticky="nsew")
+        self._right_host = ttk.Frame(self._main_split)
+        self._right_host.grid(row=0, column=1, sticky="nsew")
+        self._right_host.columnconfigure(0, weight=1)
+        self._right_host.rowconfigure(2, weight=1)
+
+        map_frame = ttk.LabelFrame(self._right_host, text="Map View")
+        map_frame.grid(row=2, column=0, sticky="nsew")
         map_frame.columnconfigure(0, weight=1)
         map_frame.rowconfigure(0, weight=1)
         self.map_canvas = Canvas(map_frame, bg="white", highlightthickness=1)
@@ -232,7 +297,6 @@ class BoreholeStickApp(ttk.Frame):
         for key, var in [
             ("collar_path", self.collar_path),
             ("lith_path", self.lith_path),
-            ("survey_path", self.survey_path),
             ("output_dir", self.output_dir),
             ("output_base", self.output_base),
             ("p1_e", self.p1_e),
@@ -243,7 +307,12 @@ class BoreholeStickApp(ttk.Frame):
             ("p2_ch", self.p2_ch),
             ("max_offset", self.max_offset),
             ("rect_width", self.rect_width),
+            ("utm_zone", self.utm_zone),
+            ("utm_hemisphere", self.utm_hemisphere),
             ("category_field", self.category_field),
+            ("interval_label_size", self.interval_label_size),
+            ("borehole_name_label_size", self.borehole_name_label_size),
+            ("surfer_manual_scale", self.surfer_manual_scale),
             ("min_label_length_m", self.min_label_length_m),
             ("thin_min_abs_m", self.thin_min_abs_m),
             ("thin_relative_to_median", self.thin_relative_to_median),
@@ -252,6 +321,10 @@ class BoreholeStickApp(ttk.Frame):
             value = data.get(key)
             if isinstance(value, str):
                 var.set(value)
+        self.reverse_chainage.set(bool(data.get("reverse_chainage", False)))
+        self.show_satellite_basemap.set(bool(data.get("show_satellite_basemap", True)))
+        self.show_borehole_names.set(bool(data.get("show_borehole_names", True)))
+        self.surfer_scale_mode.set(normalize_scale_mode(str(data.get("surfer_scale_mode", AUTO_FIT_SCALE_MODE))))
         self.smart_label_filter_enabled.set(bool(data.get("smart_label_filter_enabled", True)))
         self.thin_filter_enabled.set(bool(data.get("thin_filter_enabled", True)))
         self.merge_adjacent_enabled.set(bool(data.get("merge_adjacent_enabled", True)))
@@ -268,7 +341,6 @@ class BoreholeStickApp(ttk.Frame):
         return {
             "collar_path": self.collar_path.get(),
             "lith_path": self.lith_path.get(),
-            "survey_path": self.survey_path.get(),
             "output_dir": self.output_dir.get(),
             "output_base": self.output_base.get(),
             "p1_e": self.p1_e.get(),
@@ -279,7 +351,16 @@ class BoreholeStickApp(ttk.Frame):
             "p2_ch": self.p2_ch.get(),
             "max_offset": self.max_offset.get(),
             "rect_width": self.rect_width.get(),
+            "utm_zone": self.utm_zone.get(),
+            "utm_hemisphere": self.utm_hemisphere.get(),
             "category_field": self.category_field.get(),
+            "reverse_chainage": bool(self.reverse_chainage.get()),
+            "show_satellite_basemap": bool(self.show_satellite_basemap.get()),
+            "show_borehole_names": bool(self.show_borehole_names.get()),
+            "interval_label_size": self.interval_label_size.get(),
+            "borehole_name_label_size": self.borehole_name_label_size.get(),
+            "surfer_scale_mode": normalize_scale_mode(self.surfer_scale_mode.get()),
+            "surfer_manual_scale": self.surfer_manual_scale.get(),
             "smart_label_filter_enabled": bool(self.smart_label_filter_enabled.get()),
             "min_label_length_m": self.min_label_length_m.get(),
             "thin_filter_enabled": bool(self.thin_filter_enabled.get()),
@@ -299,6 +380,7 @@ class BoreholeStickApp(ttk.Frame):
             self._log(f"Warning: Could not save settings: {exc}")
 
     def _on_close(self) -> None:
+        self._basemap_request_seq += 1
         self._save_settings()
         self.root.destroy()
 
@@ -312,10 +394,8 @@ class BoreholeStickApp(ttk.Frame):
 
         self.collar_df = None
         self.lith_df = None
-        self.survey_df = None
         self.collar_path.set("")
         self.lith_path.set("")
-        self.survey_path.set("")
         self.output_dir.set(str(Path.cwd()))
         self.output_base.set("borehole_sticks")
         self.p1_e.set("0")
@@ -326,6 +406,15 @@ class BoreholeStickApp(ttk.Frame):
         self.p2_ch.set("100")
         self.max_offset.set("25")
         self.rect_width.set("2")
+        self.utm_zone.set("")
+        self.utm_hemisphere.set("")
+        self.reverse_chainage.set(False)
+        self.show_satellite_basemap.set(True)
+        self.show_borehole_names.set(True)
+        self.interval_label_size.set("8")
+        self.borehole_name_label_size.set("10")
+        self.surfer_scale_mode.set(AUTO_FIT_SCALE_MODE)
+        self.surfer_manual_scale.set("50")
         self.smart_label_filter_enabled.set(True)
         self.min_label_length_m.set("1.0")
         self.thin_filter_enabled.set(True)
@@ -337,12 +426,14 @@ class BoreholeStickApp(ttk.Frame):
         self.palette = {}
         self._saved_collar_mapping = {}
         self._saved_lith_mapping = {}
+        self._apply_surfer_scale_widget_state()
 
         for var in self.collar_map_vars.values():
             var.set("")
         for var in self.lith_map_vars.values():
             var.set("")
-        self.category_combo["values"] = []
+        if self.category_combo is not None:
+            self.category_combo["values"] = []
         if self.category_list is not None:
             self.category_list.delete(*self.category_list.get_children())
         if self.log_box is not None:
@@ -367,15 +458,13 @@ class BoreholeStickApp(ttk.Frame):
             path = Path(self.lith_path.get().strip())
             if path.exists():
                 self._load_lith_path(path)
-        if self.survey_path.get().strip():
-            path = Path(self.survey_path.get().strip())
-            if path.exists():
-                self._load_survey_path(path)
         self._schedule_map_redraw()
 
     def _build_ui(self) -> None:
         if self._content is None:
             raise RuntimeError("Scroll content frame is not initialized.")
+        if self._right_host is None:
+            raise RuntimeError("Right-side host frame is not initialized.")
         container = self._content
 
         files_frame = ttk.LabelFrame(container, text="Input Files")
@@ -384,16 +473,14 @@ class BoreholeStickApp(ttk.Frame):
 
         self._file_row(files_frame, 0, "Collar CSV", self.collar_path, self._load_collar)
         self._file_row(files_frame, 1, "Lithology CSV", self.lith_path, self._load_lith)
-        self._file_row(
-            files_frame,
-            2,
-            "Survey CSV (reserved, currently unused)",
-            self.survey_path,
-            self._load_survey,
-        )
 
-        line_frame = ttk.LabelFrame(container, text="Survey Line Definition")
-        line_frame.grid(row=1, column=0, sticky="ew", padx=2, pady=2)
+        setup_frame = ttk.Frame(container)
+        setup_frame.grid(row=1, column=0, sticky="ew", padx=2, pady=2)
+        setup_frame.columnconfigure(0, weight=3)
+        setup_frame.columnconfigure(1, weight=2)
+
+        line_frame = ttk.LabelFrame(setup_frame, text="Survey Line Direction")
+        line_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 3))
         for idx in range(6):
             line_frame.columnconfigure(idx, weight=1)
         labels = ["P1 Easting", "P1 Northing", "P1 Chainage", "P2 Easting", "P2 Northing", "P2 Chainage"]
@@ -406,37 +493,38 @@ class BoreholeStickApp(ttk.Frame):
             entry.bind("<Return>", lambda _e: self._schedule_map_redraw())
             self._line_entries.append(entry)
         ttk.Button(line_frame, text="Load Line CSV", command=self._load_line_csv).grid(
-            row=2, column=0, columnspan=6, sticky="e", pady=(4, 0)
+            row=3, column=0, columnspan=6, sticky="e", pady=(4, 0)
         )
+        ttk.Label(line_frame, text="Source CRS (WGS84 UTM)").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(line_frame, text="Zone").grid(row=2, column=2, sticky="e", pady=(6, 0))
+        utm_zone_entry = ttk.Entry(line_frame, textvariable=self.utm_zone, width=8)
+        utm_zone_entry.grid(row=2, column=3, sticky="w", pady=(6, 0))
+        utm_zone_entry.bind("<FocusOut>", lambda _e: self._on_map_settings_changed())
+        utm_zone_entry.bind("<Return>", lambda _e: self._on_map_settings_changed())
+        ttk.Label(line_frame, text="Hemisphere").grid(row=2, column=4, sticky="e", pady=(6, 0))
+        utm_hemisphere_combo = ttk.Combobox(
+            line_frame,
+            textvariable=self.utm_hemisphere,
+            values=("", "N", "S"),
+            state="readonly",
+            width=6,
+        )
+        utm_hemisphere_combo.grid(row=2, column=5, sticky="w", pady=(6, 0))
+        utm_hemisphere_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_map_settings_changed())
+        reverse_chainage_check = ttk.Checkbutton(
+            line_frame,
+            text="Reverse profile chainage in Surfer",
+            variable=self.reverse_chainage,
+            command=self._save_settings,
+        )
+        reverse_chainage_check.grid(row=4, column=0, columnspan=6, sticky="w", pady=(6, 0))
+        ttk.Label(
+            line_frame,
+            text="Use for sections that should read right-to-left on the Surfer profile.",
+        ).grid(row=5, column=0, columnspan=6, sticky="w", pady=(2, 0))
 
-        options_frame = ttk.LabelFrame(container, text="Options")
-        options_frame.grid(row=2, column=0, sticky="ew", padx=2, pady=2)
-        options_frame.columnconfigure(0, weight=1)
-        options_frame.columnconfigure(1, weight=1)
-
-        basic_frame = ttk.LabelFrame(options_frame, text="Basic")
-        basic_frame.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
-        basic_frame.columnconfigure(1, weight=1)
-        ttk.Label(basic_frame, text="Max Off-Line Distance (m)").grid(row=0, column=0, sticky="w")
-        self._max_offset_entry = ttk.Entry(basic_frame, textvariable=self.max_offset, width=14)
-        self._max_offset_entry.grid(
-            row=0, column=1, sticky="w", padx=(8, 0)
-        )
-        self._max_offset_entry.bind("<FocusOut>", lambda _e: self._schedule_map_redraw())
-        self._max_offset_entry.bind("<Return>", lambda _e: self._schedule_map_redraw())
-        ttk.Label(basic_frame, text="Stick Width (m)").grid(row=1, column=0, sticky="w")
-        ttk.Entry(basic_frame, textvariable=self.rect_width, width=14).grid(
-            row=1, column=1, sticky="w", padx=(8, 0)
-        )
-        ttk.Label(basic_frame, text="Classification Column").grid(row=2, column=0, sticky="w")
-        self.category_combo = ttk.Combobox(
-            basic_frame, textvariable=self.category_field, state="readonly", width=28
-        )
-        self.category_combo.grid(row=2, column=1, sticky="ew", padx=(8, 0))
-        self.category_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_palette_view())
-
-        filter_frame = ttk.LabelFrame(options_frame, text="Label Filtering")
-        filter_frame.grid(row=0, column=1, sticky="nsew", padx=2, pady=2)
+        filter_frame = ttk.LabelFrame(setup_frame, text="Label Filtering")
+        filter_frame.grid(row=0, column=1, sticky="nsew", padx=(3, 0))
         filter_frame.columnconfigure(0, weight=1)
         filter_frame.columnconfigure(1, weight=1)
 
@@ -493,8 +581,8 @@ class BoreholeStickApp(ttk.Frame):
         ]
         self._apply_label_filter_widget_state()
 
-        output_frame = ttk.LabelFrame(container, text="Output")
-        output_frame.grid(row=3, column=0, sticky="ew", padx=2, pady=2)
+        output_frame = ttk.LabelFrame(self._right_host, text="Output")
+        output_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         output_frame.columnconfigure(1, weight=1)
         ttk.Label(output_frame, text="Output Folder").grid(row=0, column=0, sticky="w")
         ttk.Entry(output_frame, textvariable=self.output_dir).grid(row=0, column=1, sticky="ew")
@@ -502,23 +590,41 @@ class BoreholeStickApp(ttk.Frame):
         ttk.Label(output_frame, text="File Base Name").grid(row=1, column=0, sticky="w")
         ttk.Entry(output_frame, textvariable=self.output_base).grid(row=1, column=1, sticky="ew")
 
+        action_frame = ttk.Frame(self._right_host)
+        action_frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(action_frame, text="Generate Outputs", command=self._run).pack(side="left")
+        ttk.Button(action_frame, text="Reset Settings", command=self._reset_settings).pack(
+            side="left", padx=6
+        )
+
         mapping_frame = ttk.LabelFrame(container, text="Column Mapping")
-        mapping_frame.grid(row=4, column=0, sticky="ew", padx=2, pady=2)
+        mapping_frame.grid(row=2, column=0, sticky="ew", padx=2, pady=2)
         mapping_frame.columnconfigure(1, weight=1)
         mapping_frame.columnconfigure(3, weight=1)
         self._mapping_controls(mapping_frame)
 
-        palette_frame = ttk.LabelFrame(container, text="Palette")
-        palette_frame.grid(row=5, column=0, sticky="nsew", padx=2, pady=2)
+        preview_palette_row = ttk.Frame(container)
+        preview_palette_row.grid(row=3, column=0, sticky="nsew", padx=2, pady=2)
+        preview_palette_row.columnconfigure(0, weight=1)
+        preview_palette_row.columnconfigure(1, weight=1)
+        preview_palette_row.rowconfigure(0, weight=1)
+        container.rowconfigure(3, weight=1)
+
+        preview_frame = ttk.LabelFrame(preview_palette_row, text="Section Preview")
+        preview_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 3))
+        preview_frame.columnconfigure(1, weight=1)
+        self._right_controls = preview_frame
+
+        palette_frame = ttk.LabelFrame(preview_palette_row, text="Palette")
+        palette_frame.grid(row=0, column=1, sticky="nsew", padx=(3, 0))
         palette_frame.columnconfigure(0, weight=1)
         palette_frame.rowconfigure(0, weight=1)
-        container.rowconfigure(5, weight=1)
 
         self.category_list = ttk.Treeview(palette_frame, columns=("category", "color"), show="headings", height=10)
         self.category_list.heading("category", text="Category")
         self.category_list.heading("color", text="Color")
-        self.category_list.column("category", width=320)
-        self.category_list.column("color", width=180)
+        self.category_list.column("category", width=220)
+        self.category_list.column("color", width=120)
         self.category_list.grid(row=0, column=0, sticky="nsew")
         palette_btns = ttk.Frame(palette_frame)
         palette_btns.grid(row=1, column=0, sticky="ew", pady=2)
@@ -526,25 +632,93 @@ class BoreholeStickApp(ttk.Frame):
         ttk.Button(palette_btns, text="Load Palette CSV", command=self._load_palette).pack(side="left", padx=2)
         ttk.Button(palette_btns, text="Save Palette CSV", command=self._save_palette).pack(side="left", padx=2)
 
-        run_frame = ttk.Frame(container)
-        run_frame.grid(row=6, column=0, sticky="ew", padx=2, pady=6)
-        ttk.Button(run_frame, text="Generate Outputs", command=self._run).pack(side="left")
-        ttk.Button(run_frame, text="Reset Settings", command=self._reset_settings).pack(side="left", padx=6)
-
         log_frame = ttk.LabelFrame(container, text="Messages")
-        log_frame.grid(row=7, column=0, sticky="nsew", padx=2, pady=2)
-        container.rowconfigure(7, weight=1)
+        log_frame.grid(row=4, column=0, sticky="nsew", padx=2, pady=2)
+        container.rowconfigure(4, weight=1)
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_box = ttk.Treeview(log_frame, columns=("message",), show="headings", height=6)
         self.log_box.heading("message", text="Message")
         self.log_box.column("message", width=800)
         self.log_box.grid(row=0, column=0, sticky="nsew")
+
+        preview_frame = self._right_controls
+        ttk.Label(preview_frame, text="Max Off-Line Distance (m)").grid(row=0, column=0, sticky="w")
+        self._max_offset_entry = ttk.Entry(preview_frame, textvariable=self.max_offset, width=14)
+        self._max_offset_entry.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self._max_offset_entry.bind("<FocusOut>", lambda _e: self._schedule_map_redraw())
+        self._max_offset_entry.bind("<Return>", lambda _e: self._schedule_map_redraw())
+
+        ttk.Label(preview_frame, text="Stick Width (m)").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        stick_width_entry = ttk.Entry(preview_frame, textvariable=self.rect_width, width=14)
+        stick_width_entry.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
+        stick_width_entry.bind("<FocusOut>", lambda _e: self._save_settings())
+
+        ttk.Checkbutton(
+            preview_frame,
+            text="Show borehole names above ground in Surfer",
+            variable=self.show_borehole_names,
+            command=self._save_settings,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        ttk.Label(preview_frame, text="Interval label size").grid(row=3, column=0, sticky="w", pady=(4, 0))
+        interval_label_size_entry = ttk.Entry(preview_frame, textvariable=self.interval_label_size, width=14)
+        interval_label_size_entry.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
+        interval_label_size_entry.bind("<FocusOut>", lambda _e: self._save_settings())
+
+        ttk.Label(preview_frame, text="Borehole name label size").grid(
+            row=4, column=0, sticky="w", pady=(4, 0)
+        )
+        borehole_label_size_entry = ttk.Entry(
+            preview_frame, textvariable=self.borehole_name_label_size, width=14
+        )
+        borehole_label_size_entry.grid(row=4, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
+        borehole_label_size_entry.bind("<FocusOut>", lambda _e: self._save_settings())
+
+        ttk.Label(preview_frame, text="Surfer map scale").grid(row=5, column=0, sticky="w", pady=(6, 0))
+        scale_mode_frame = ttk.Frame(preview_frame)
+        scale_mode_frame.grid(row=5, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+        ttk.Radiobutton(
+            scale_mode_frame,
+            text="Auto-fit A1 landscape",
+            variable=self.surfer_scale_mode,
+            value=AUTO_FIT_SCALE_MODE,
+            command=self._on_surfer_scale_mode_changed,
+        ).pack(side="left")
+        ttk.Radiobutton(
+            scale_mode_frame,
+            text="Manual",
+            variable=self.surfer_scale_mode,
+            value=MANUAL_SCALE_MODE,
+            command=self._on_surfer_scale_mode_changed,
+        ).pack(side="left", padx=(8, 0))
+
+        ttk.Label(preview_frame, text="Manual scale (1:x)").grid(row=6, column=0, sticky="w", pady=(4, 0))
+        self._surfer_manual_scale_entry = ttk.Entry(preview_frame, textvariable=self.surfer_manual_scale, width=14)
+        self._surfer_manual_scale_entry.grid(row=6, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
+        self._surfer_manual_scale_entry.bind("<FocusOut>", lambda _e: self._save_settings())
+        self._apply_surfer_scale_widget_state()
+
+        ttk.Checkbutton(
+            preview_frame,
+            text="Show satellite basemap in map view",
+            variable=self.show_satellite_basemap,
+            command=self._on_map_settings_changed,
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        ttk.Label(
+            preview_frame,
+            text="Satellite basemap uses WGS84 UTM zone + hemisphere and only affects the in-app map.",
+        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ttk.Label(
+            preview_frame,
+            text="These controls affect screen fit, export styling, and the map preview corridor.",
+        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(6, 0))
         self._schedule_map_redraw()
 
     def _mapping_controls(self, parent: ttk.LabelFrame) -> None:
         ttk.Label(parent, text="Collar fields").grid(row=0, column=0, sticky="w")
-        ttk.Label(parent, text="Lith fields").grid(row=0, column=2, sticky="w")
+        ttk.Label(parent, text="Interval fields").grid(row=0, column=2, sticky="w")
 
         collar_fields = ["hole_id", "easting", "northing", "rl"]
         lith_fields = ["hole_id", "from_depth", "to_depth"]
@@ -563,10 +737,20 @@ class BoreholeStickApp(ttk.Frame):
             combo.grid(row=idx, column=3, sticky="ew")
             combo.bind("<<ComboboxSelected>>", lambda _e: self._schedule_map_redraw())
 
+        classification_row = len(lith_fields) + 1
+        ttk.Label(parent, text="classification").grid(row=classification_row, column=2, sticky="w")
+        self.category_combo = ttk.Combobox(parent, textvariable=self.category_field, state="readonly")
+        self.category_combo.grid(row=classification_row, column=3, sticky="ew")
+        self.category_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_palette_view())
+
     def _file_row(self, parent: ttk.Frame, row: int, label: str, var: StringVar, cb) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w")
         ttk.Entry(parent, textvariable=var).grid(row=row, column=1, sticky="ew")
         ttk.Button(parent, text="Load", command=cb).grid(row=row, column=2, padx=2)
+
+    def _build_footer(self) -> None:
+        footer = ttk.Label(self, text="Made by Tony Parks", foreground="#666666")
+        footer.grid(row=1, column=0, sticky="sw", padx=(2, 0), pady=(6, 0))
 
     def _pick_output_dir(self) -> None:
         path = filedialog.askdirectory()
@@ -576,6 +760,28 @@ class BoreholeStickApp(ttk.Frame):
 
     def _on_smart_filter_toggle(self) -> None:
         self._apply_label_filter_widget_state()
+        self._save_settings()
+
+    def _on_map_settings_changed(self) -> None:
+        self._basemap_request_seq += 1
+        self._basemap_pending_key = None
+        self._basemap_image_key = None
+        self._basemap_photo = None
+        self._basemap_attribution = None
+        self._basemap_status = None
+        self._basemap_failed_key = None
+        self._basemap_failed_status = None
+        self._save_settings()
+        self._schedule_map_redraw()
+
+    def _apply_surfer_scale_widget_state(self) -> None:
+        if self._surfer_manual_scale_entry is None:
+            return
+        state = "normal" if normalize_scale_mode(self.surfer_scale_mode.get()) == MANUAL_SCALE_MODE else "disabled"
+        self._surfer_manual_scale_entry.configure(state=state)
+
+    def _on_surfer_scale_mode_changed(self) -> None:
+        self._apply_surfer_scale_widget_state()
         self._save_settings()
 
     def _apply_label_filter_widget_state(self) -> None:
@@ -627,20 +833,14 @@ class BoreholeStickApp(ttk.Frame):
         for field, column in self._saved_lith_mapping.items():
             if field in self.lith_map_vars and column in self.lith_df.columns:
                 self.lith_map_vars[field].set(column)
-        self.category_combo["values"] = list(self.lith_df.columns)
+        if self.category_combo is not None:
+            self.category_combo["values"] = list(self.lith_df.columns)
         if self.category_field.get() and self.category_field.get() in self.lith_df.columns:
             self.category_field.set(self.category_field.get())
         elif self.lith_df.columns.size > 0:
             self.category_field.set(str(self.lith_df.columns[0]))
         self._refresh_palette_view()
         self._log(f"Loaded lithology CSV with {len(self.lith_df)} rows.")
-
-    def _load_survey_path(self, path: str | Path) -> None:
-        self.survey_df = read_csv(path)
-        self.survey_path.set(str(path))
-        self._log(
-            f"Loaded survey CSV with {len(self.survey_df)} rows (reserved; currently ignored in processing)."
-        )
 
     def _load_collar(self) -> None:
         path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
@@ -654,13 +854,6 @@ class BoreholeStickApp(ttk.Frame):
         if not path:
             return
         self._load_lith_path(path)
-        self._save_settings()
-
-    def _load_survey(self) -> None:
-        path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
-        if not path:
-            return
-        self._load_survey_path(path)
         self._save_settings()
 
     def _load_line_csv(self) -> None:
@@ -943,6 +1136,107 @@ class BoreholeStickApp(ttk.Frame):
                 pass
         self._map_after_id = self.root.after(60, self._redraw_map)
 
+    def _satellite_settings(self) -> tuple[int | None, str | None, str | None]:
+        if not self.show_satellite_basemap.get():
+            return None, None, None
+        zone_text = self.utm_zone.get().strip()
+        hemisphere_text = self.utm_hemisphere.get().strip()
+        if not zone_text or not hemisphere_text:
+            return None, None, "Enter WGS84 UTM zone and hemisphere to load satellite imagery."
+        try:
+            zone = validate_utm_zone(int(zone_text))
+            hemisphere = validate_hemisphere(hemisphere_text)
+        except Exception as exc:
+            return None, None, str(exc)
+        return zone, hemisphere, None
+
+    def _basemap_request_key(self, extent: tuple[float, float, float, float], canvas_w: int, canvas_h: int) -> tuple[Any, ...]:
+        return (
+            round(extent[0], 3),
+            round(extent[1], 3),
+            round(extent[2], 3),
+            round(extent[3], 3),
+            int(canvas_w),
+            int(canvas_h),
+        )
+
+    def _start_basemap_request(
+        self,
+        key: tuple[Any, ...],
+        extent: tuple[float, float, float, float],
+        pixel_w: int,
+        pixel_h: int,
+    ) -> None:
+        self._basemap_request_seq += 1
+        request_seq = self._basemap_request_seq
+        self._basemap_pending_key = key
+        self._basemap_failed_key = None
+        self._basemap_failed_status = None
+
+        def worker() -> None:
+            result: BasemapImage | None = None
+            failure: str | None = None
+            try:
+                result = load_world_imagery(
+                    extent=extent,
+                    pixel_w=pixel_w,
+                    pixel_h=pixel_h,
+                    cache_dir=self._basemap_cache_dir,
+                )
+            except Exception as exc:
+                failure = f"Satellite imagery unavailable: {exc}"
+            try:
+                self.root.after(0, lambda: self._finish_basemap_request(request_seq, key, result, failure))
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_basemap_request(
+        self,
+        request_seq: int,
+        key: tuple[Any, ...],
+        result: BasemapImage | None,
+        failure: str | None,
+    ) -> None:
+        if request_seq != self._basemap_request_seq:
+            return
+        self._basemap_pending_key = None
+        if result is None:
+            self._basemap_image_key = None
+            self._basemap_photo = None
+            self._basemap_attribution = None
+            self._basemap_failed_key = key
+            self._basemap_failed_status = failure or "Satellite imagery unavailable."
+            self._basemap_status = None
+        else:
+            self._basemap_photo = ImageTk.PhotoImage(result.image)
+            self._basemap_image_key = key
+            self._basemap_attribution = result.attribution
+            self._basemap_status = None
+            self._basemap_failed_key = None
+            self._basemap_failed_status = None
+        self._schedule_map_redraw()
+
+    def _draw_satellite_basemap(
+        self,
+        canvas: Canvas,
+        extent: tuple[float, float, float, float],
+        transform: MapTransform,
+    ) -> tuple[str | None, str | None]:
+        left, top, right, bottom = transform_screen_rect(transform)
+        pixel_w = max(1, right - left)
+        pixel_h = max(1, bottom - top)
+        key = self._basemap_request_key(extent, pixel_w, pixel_h)
+        if self._basemap_image_key == key and self._basemap_photo is not None:
+            canvas.create_image(left, top, anchor="nw", image=self._basemap_photo)
+            return self._basemap_status, self._basemap_attribution
+        if self._basemap_failed_key == key:
+            return self._basemap_failed_status, None
+        if self._basemap_pending_key != key:
+            self._start_basemap_request(key=key, extent=extent, pixel_w=pixel_w, pixel_h=pixel_h)
+        return "Loading satellite imagery...", None
+
     def _collect_map_features(self) -> tuple[list[Any], LineDefinition | None, float | None, str | None]:
         collars: list[Any] = []
         line: LineDefinition | None = None
@@ -973,6 +1267,46 @@ class BoreholeStickApp(ttk.Frame):
             status = "Load collar CSV to view boreholes."
         return collars, line, max_offset, status
 
+    def _map_view_buffer_ratio(self) -> float:
+        if self.show_satellite_basemap.get():
+            return self._satellite_map_buffer_ratio
+        return self._map_buffer_ratio
+
+    def _draw_map_label_with_backdrop(
+        self,
+        canvas: Canvas,
+        x: float,
+        y: float,
+        text: str,
+        *,
+        anchor: str = "w",
+        fill: str = "#222222",
+        font: tuple[str, int] | tuple[str, int, str] = ("Segoe UI", 8),
+        pad_x: int = 3,
+        pad_y: int = 1,
+    ) -> int:
+        text_id = canvas.create_text(
+            x,
+            y,
+            text=text,
+            anchor=anchor,
+            fill=fill,
+            font=font,
+        )
+        bbox = canvas.bbox(text_id)
+        if bbox is not None:
+            left, top, right, bottom = bbox
+            backdrop_id = canvas.create_rectangle(
+                left - pad_x,
+                top - pad_y,
+                right + pad_x,
+                bottom + pad_y,
+                fill="white",
+                outline="",
+            )
+            canvas.tag_lower(backdrop_id, text_id)
+        return text_id
+
     def _redraw_map(self) -> None:
         self._map_after_id = None
         if self.map_canvas is None:
@@ -986,13 +1320,13 @@ class BoreholeStickApp(ttk.Frame):
             return
 
         collars, line, max_offset, status = self._collect_map_features()
-        points: list[tuple[float, float]] = []
-        points.extend((float(c.easting), float(c.northing)) for c in collars)
+        source_points: list[tuple[float, float]] = []
+        source_points.extend((float(c.easting), float(c.northing)) for c in collars)
         if line is not None:
-            points.append((line.p1.easting, line.p1.northing))
-            points.append((line.p2.easting, line.p2.northing))
+            source_points.append((line.p1.easting, line.p1.northing))
+            source_points.append((line.p2.easting, line.p2.northing))
 
-        if not points:
+        if not source_points:
             canvas.create_text(
                 w / 2,
                 h / 2,
@@ -1002,12 +1336,12 @@ class BoreholeStickApp(ttk.Frame):
             )
             return
 
-        extent = expand_extent(
-            compute_extent(points),
-            buffer_ratio=self._map_buffer_ratio,
+        map_buffer_ratio = self._map_view_buffer_ratio()
+        source_extent = expand_extent(
+            compute_extent(source_points),
+            buffer_ratio=map_buffer_ratio,
             min_abs=1.0,
         )
-        transform = fit_transform(extent, w, h, padding_px=self._map_padding_px)
 
         projected = []
         included_ids: set[str] = set()
@@ -1020,41 +1354,105 @@ class BoreholeStickApp(ttk.Frame):
             except Exception:
                 pass
 
+        corridor_source: list[tuple[float, float]] = []
         if line is not None and max_offset is not None and max_offset > 0:
-            corridor = corridor_polygon_for_extent(
+            corridor_source = corridor_polygon_for_extent(
                 (line.p1.easting, line.p1.northing),
                 (line.p2.easting, line.p2.northing),
                 max_offset=max_offset,
-                extent=extent,
+                extent=source_extent,
             )
-            if corridor:
-                coords: list[float] = []
-                for x, y in corridor:
-                    sx, sy = world_to_screen(x, y, transform)
-                    coords.extend([sx, sy])
-                canvas.create_polygon(
-                    coords,
-                    fill="#9ecae1",
-                    outline="#4292c6",
-                    stipple="gray25",
-                    width=1,
-                )
 
-        if line is not None:
-            p1s = world_to_screen(line.p1.easting, line.p1.northing, transform)
-            p2s = world_to_screen(line.p2.easting, line.p2.northing, transform)
+        draw_extent = source_extent
+        draw_line_points: list[tuple[float, float]] = []
+        draw_collar_points = {
+            collar.hole_id: (float(collar.easting), float(collar.northing)) for collar in collars
+        }
+        draw_corridor = corridor_source
+        satellite_ready = False
+        satellite_status: str | None = None
+        attribution: str | None = None
+        zone, hemisphere, satellite_settings_status = self._satellite_settings()
+        if self.show_satellite_basemap.get():
+            if satellite_settings_status:
+                satellite_status = satellite_settings_status
+            else:
+                try:
+                    draw_line_points = transform_points(
+                        [(line.p1.easting, line.p1.northing), (line.p2.easting, line.p2.northing)] if line is not None else [],
+                        zone=zone or 0,
+                        hemisphere=hemisphere or "",
+                        target="EPSG:3857",
+                    )
+                    transformed_collars = transform_points(
+                        [(float(collar.easting), float(collar.northing)) for collar in collars],
+                        zone=zone or 0,
+                        hemisphere=hemisphere or "",
+                        target="EPSG:3857",
+                    )
+                    draw_collar_points = {
+                        collar.hole_id: transformed_collars[idx] for idx, collar in enumerate(collars)
+                    }
+                    draw_corridor = transform_points(
+                        corridor_source,
+                        zone=zone or 0,
+                        hemisphere=hemisphere or "",
+                        target="EPSG:3857",
+                    )
+                    transformed_points = list(draw_collar_points.values())
+                    transformed_points.extend(draw_line_points)
+                    if transformed_points:
+                        draw_extent = expand_extent(
+                            compute_extent(transformed_points),
+                            buffer_ratio=map_buffer_ratio,
+                            min_abs=1.0,
+                        )
+                        satellite_ready = True
+                except Exception as exc:
+                    satellite_status = f"Satellite imagery unavailable: {exc}"
+        if not draw_line_points and line is not None:
+            draw_line_points = [
+                (line.p1.easting, line.p1.northing),
+                (line.p2.easting, line.p2.northing),
+            ]
+
+        transform = fit_transform(draw_extent, w, h, padding_px=self._map_padding_px)
+        if self.show_satellite_basemap.get() and not satellite_settings_status and satellite_ready:
+            satellite_status, attribution = self._draw_satellite_basemap(
+                canvas=canvas,
+                extent=draw_extent,
+                transform=transform,
+            )
+
+        if draw_corridor:
+            coords: list[float] = []
+            for x, y in draw_corridor:
+                sx, sy = world_to_screen(x, y, transform)
+                coords.extend([sx, sy])
+            canvas.create_polygon(
+                coords,
+                fill="",
+                outline="#ffd54f",
+                width=2,
+            )
+
+        if draw_line_points:
+            p1s = world_to_screen(draw_line_points[0][0], draw_line_points[0][1], transform)
+            p2s = world_to_screen(draw_line_points[1][0], draw_line_points[1][1], transform)
             canvas.create_line(*p1s, *p2s, fill="#1f77b4", width=2)
 
-            for label, pt, color in [
-                ("P1", line.p1, "#d62728"),
-                ("P2", line.p2, "#2ca02c"),
+            for label, point, color in [
+                ("P1", draw_line_points[0], "#FF69B4"),
+                ("P2", draw_line_points[1], "#800080"),
             ]:
-                sx, sy = world_to_screen(pt.easting, pt.northing, transform)
-                canvas.create_oval(sx - 5, sy - 5, sx + 5, sy + 5, fill=color, outline=color)
+                sx, sy = world_to_screen(point[0], point[1], transform)
+                canvas.create_line(sx - 5, sy, sx + 5, sy, fill=color, width=2)
+                canvas.create_line(sx, sy - 5, sx, sy + 5, fill=color, width=2)
                 canvas.create_text(sx + 8, sy - 8, text=label, anchor="w", fill=color, font=("Segoe UI", 9, "bold"))
 
         for collar in collars:
-            sx, sy = world_to_screen(float(collar.easting), float(collar.northing), transform)
+            x, y = draw_collar_points[collar.hole_id]
+            sx, sy = world_to_screen(x, y, transform)
             if collar.hole_id in included_ids:
                 pt_fill, pt_outline = "#2ca02c", "#1b7f3a"
             elif collar.hole_id in excluded_ids:
@@ -1062,7 +1460,8 @@ class BoreholeStickApp(ttk.Frame):
             else:
                 pt_fill, pt_outline = "#2b2b2b", "#2b2b2b"
             canvas.create_oval(sx - 3, sy - 3, sx + 3, sy + 3, fill=pt_fill, outline=pt_outline)
-            canvas.create_text(
+            self._draw_map_label_with_backdrop(
+                canvas,
                 sx + 6,
                 sy - 6,
                 text=str(collar.hole_id),
@@ -1078,8 +1477,25 @@ class BoreholeStickApp(ttk.Frame):
             legend += f"  Max offset: {max_offset:g} m"
         canvas.create_text(8, 8, text=legend, anchor="nw", fill="#1f1f1f", font=("Segoe UI", 9, "bold"))
 
-        if status:
-            canvas.create_text(8, h - 8, text=status, anchor="sw", fill="#555555", font=("Segoe UI", 8))
+        status_lines = [text for text in [status, satellite_status] if text]
+        if status_lines:
+            canvas.create_text(
+                8,
+                h - 8,
+                text="  ".join(status_lines),
+                anchor="sw",
+                fill="#555555",
+                font=("Segoe UI", 8),
+            )
+        if attribution:
+            canvas.create_text(
+                w - 8,
+                h - 8,
+                text=attribution,
+                anchor="se",
+                fill="#444444",
+                font=("Segoe UI", 7),
+            )
 
     def _run(self) -> None:
         try:
@@ -1095,6 +1511,10 @@ class BoreholeStickApp(ttk.Frame):
             adjacent_gap_tolerance_m = float(self.adjacent_gap_tolerance_m.get())
             min_label_length_m = float(self.min_label_length_m.get())
             max_offset_m = float(self.max_offset.get())
+            interval_label_size = float(self.interval_label_size.get())
+            borehole_name_label_size = float(self.borehole_name_label_size.get())
+            surfer_scale_mode = normalize_scale_mode(self.surfer_scale_mode.get())
+            surfer_manual_scale: float | None = None
             if thin_min_abs_m < 0:
                 raise ValueError("Thin min abs (m) must be >= 0.")
             if thin_relative_to_median < 0:
@@ -1103,6 +1523,14 @@ class BoreholeStickApp(ttk.Frame):
                 raise ValueError("Adjacent gap tolerance (m) must be >= 0.")
             if min_label_length_m < 0:
                 raise ValueError("Minimum label length (m) must be >= 0.")
+            if interval_label_size <= 0:
+                raise ValueError("Interval label size must be > 0.")
+            if borehole_name_label_size <= 0:
+                raise ValueError("Borehole name label size must be > 0.")
+            if surfer_scale_mode == MANUAL_SCALE_MODE:
+                surfer_manual_scale = float(self.surfer_manual_scale.get())
+                if surfer_manual_scale <= 0:
+                    raise ValueError("Manual Surfer scale must be > 0.")
 
             collar_mapping = self._get_mapping(
                 self.collar_map_vars, ["hole_id", "easting", "northing", "rl"]
@@ -1113,6 +1541,7 @@ class BoreholeStickApp(ttk.Frame):
                 collar_df=self.collar_df,
                 lith_df=self.lith_df,
                 collar_hole_col=collar_mapping["hole_id"],
+                lith_hole_col=lith_mapping["hole_id"],
                 classification_col=category_field,
                 max_offset_m=max_offset_m,
             )
@@ -1124,6 +1553,12 @@ class BoreholeStickApp(ttk.Frame):
             line = self._line_definition()
             projected = project_collar_records(collars, line, max_offset_m)
             included_holes = {hole.hole_id for hole in projected if hole.included}
+            matched_included_holes = {item.hole_id for item in valid_lith if item.hole_id in included_holes}
+            if included_holes and not matched_included_holes:
+                raise ValueError(
+                    "No lithology intervals match the included holes. "
+                    "Check the lithology hole_id mapping and confirm the section line / max offset include the intended boreholes."
+                )
 
             category_values = [item.category for item in valid_lith if item.hole_id in included_holes]
             if not category_values:
@@ -1144,6 +1579,7 @@ class BoreholeStickApp(ttk.Frame):
             shp_path = out_dir / f"{base}.shp"
             postmap_path = out_dir / f"{base}_postmap.csv"
             postmap_labels_path = out_dir / f"{base}_postmap_labels.csv"
+            borehole_names_postmap_path = out_dir / f"{base}_postmap_borehole_names.csv"
             qa_path = out_dir / f"{base}_qa.csv"
             pal_path = out_dir / f"{base}_palette.csv"
             surfer_script_path = out_dir / f"{base}_surfer_autoload.py"
@@ -1169,6 +1605,15 @@ class BoreholeStickApp(ttk.Frame):
                 adjacent_gap_tolerance_m=adjacent_gap_tolerance_m,
                 class_map=class_map,
             )
+            borehole_names_rows = 0
+            borehole_names_postmap_arg: Path | None = None
+            if self.show_borehole_names.get():
+                borehole_names_postmap_path, borehole_names_rows = write_borehole_name_postmap_csv(
+                    path=borehole_names_postmap_path,
+                    projected_holes=projected,
+                    collars=collars,
+                )
+                borehole_names_postmap_arg = borehole_names_postmap_path
             counts = Counter(poly.hole_id for poly in polygons)
             write_qa_csv(qa_path, projected, counts)
             save_palette_csv(pal_path, category_field, self.palette)
@@ -1176,22 +1621,35 @@ class BoreholeStickApp(ttk.Frame):
                 path=surfer_script_path,
                 shp_path=shp_path,
                 palette_csv_path=pal_path,
-                postmap_csv_path=postmap_labels_path,
-                label_field=category_field,
+                interval_postmap_csv_path=postmap_labels_path,
+                interval_label_field=category_field,
+                class_map=class_map,
                 out_srf_path=out_srf_path,
+                reverse_chainage=bool(self.reverse_chainage.get()),
+                borehole_postmap_csv_path=borehole_names_postmap_arg,
+                borehole_label_field="hole_id",
+                interval_label_size=interval_label_size,
+                borehole_label_size=borehole_name_label_size,
+                scale_mode=surfer_scale_mode,
+                manual_scale=surfer_manual_scale,
             )
             surfer_bat_path = write_surfer_autoload_bat(
                 path=surfer_bat_path,
                 script_path=surfer_script_path,
                 shp_path=shp_path,
                 palette_csv_path=pal_path,
-                postmap_csv_path=postmap_labels_path,
-                label_field=category_field,
+                interval_postmap_csv_path=postmap_labels_path,
+                interval_label_field=category_field,
                 out_srf_path=out_srf_path,
+                reverse_chainage=bool(self.reverse_chainage.get()),
+                borehole_postmap_csv_path=borehole_names_postmap_arg,
+                borehole_label_field="hole_id",
+                interval_label_size=interval_label_size,
+                borehole_label_size=borehole_name_label_size,
+                scale_mode=surfer_scale_mode,
+                manual_scale=surfer_manual_scale,
             )
 
-            if self.survey_df is not None:
-                warnings.append("Survey file supplied but currently ignored (vertical borehole assumption).")
             if invalid_lith:
                 warnings.append(f"Skipped {len(invalid_lith)} invalid intervals where to_depth <= from_depth.")
             overlap_count = count_lith_overlaps(valid_lith)
@@ -1209,6 +1667,18 @@ class BoreholeStickApp(ttk.Frame):
             self._log("SHP includes numeric CLASS_ID field for Surfer Classed Colors.")
             self._log(f"PostMap CSV (full): {postmap_path}")
             self._log(f"PostMap CSV (labels): {postmap_labels_path}")
+            if borehole_names_postmap_arg is not None:
+                self._log(f"PostMap CSV (borehole names): {borehole_names_postmap_arg}")
+            else:
+                self._log("PostMap CSV (borehole names): OFF")
+            self._log(
+                "Profile chainage orientation: "
+                f"{'reversed in Surfer output' if self.reverse_chainage.get() else 'standard left-to-right'}"
+            )
+            if self.reverse_chainage.get():
+                self._log(
+                    "Note: Manual SHP/PostMap imports outside the generated runner still need the Surfer X axis reversed."
+                )
             self._log(
                 "Label filter: "
                 f"{'ON' if self.smart_label_filter_enabled.get() else 'OFF'}, "
@@ -1222,6 +1692,17 @@ class BoreholeStickApp(ttk.Frame):
                 f"(gap_tol={adjacent_gap_tolerance_m})"
             )
             self._log(f"Rows full -> labels: {postmap_rows} -> {postmap_labels_rows}")
+            self._log(
+                "Surfer label sizes: "
+                f"interval={interval_label_size:g}, "
+                f"borehole_names={borehole_name_label_size:g}"
+            )
+            if surfer_scale_mode == MANUAL_SCALE_MODE and surfer_manual_scale is not None:
+                self._log(f"Surfer map scale: manual 1:{surfer_manual_scale:g}")
+            else:
+                self._log("Surfer map scale: auto-fit A1 landscape with 20% margin")
+            if borehole_names_postmap_arg is not None:
+                self._log(f"Borehole-name rows: {borehole_names_rows}")
             self._log(f"QA CSV: {qa_path}")
             self._log(f"Palette CSV: {pal_path}")
             self._log(f"Surfer script: {surfer_script_path}")
