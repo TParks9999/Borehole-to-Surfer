@@ -16,6 +16,8 @@ class MapTransform:
     scale: float
     offset_x: float
     offset_y: float
+    draw_w: float
+    draw_h: float
 
 
 def compute_extent(points: Iterable[Point]) -> Extent:
@@ -60,13 +62,29 @@ def fit_transform(extent: Extent, canvas_w: int, canvas_h: int, padding_px: int 
     draw_h = height * scale
     offset_x = float(padding_px) + (avail_w - draw_w) / 2.0
     offset_y = float(padding_px) + (avail_h - draw_h) / 2.0
-    return MapTransform(min_x=min_x, max_y=max_y, scale=scale, offset_x=offset_x, offset_y=offset_y)
+    return MapTransform(
+        min_x=min_x,
+        max_y=max_y,
+        scale=scale,
+        offset_x=offset_x,
+        offset_y=offset_y,
+        draw_w=draw_w,
+        draw_h=draw_h,
+    )
 
 
 def world_to_screen(x: float, y: float, transform: MapTransform) -> Point:
     sx = transform.offset_x + (x - transform.min_x) * transform.scale
     sy = transform.offset_y + (transform.max_y - y) * transform.scale
     return sx, sy
+
+
+def transform_screen_rect(transform: MapTransform) -> tuple[int, int, int, int]:
+    left = int(math.floor(transform.offset_x))
+    top = int(math.floor(transform.offset_y))
+    right = int(math.ceil(transform.offset_x + transform.draw_w))
+    bottom = int(math.ceil(transform.offset_y + transform.draw_h))
+    return left, top, right, bottom
 
 
 def corridor_polygon_for_extent(
@@ -111,4 +129,3 @@ def corridor_polygon_for_extent(
         (c2x - nx * d, c2y - ny * d),
         (c1x - nx * d, c1y - ny * d),
     ]
-

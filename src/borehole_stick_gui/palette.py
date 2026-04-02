@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Dict, Iterable
 
 
+def _normalize_text(value: str) -> str:
+    return str(value).strip().casefold()
+
+
 def normalize_hex(color: str) -> str:
     c = str(color).strip()
     if not c:
@@ -33,8 +37,16 @@ RAINBOW_PRESET = [
 
 
 def ensure_palette(categories: Iterable[str], base: Dict[str, str]) -> Dict[str, str]:
-    out = {k: normalize_hex(v) for k, v in base.items()}
-    missing = [cat for cat in sorted({str(c) for c in categories}) if cat not in out]
+    normalized_categories = sorted(
+        {str(category).strip() for category in categories if str(category).strip() != ""}
+    )
+    normalized_base = {
+        str(category).strip(): normalize_hex(color)
+        for category, color in base.items()
+        if str(category).strip() != ""
+    }
+    out = {category: normalized_base[category] for category in normalized_categories if category in normalized_base}
+    missing = [category for category in normalized_categories if category not in out]
     for idx, cat in enumerate(missing):
         out[cat] = RAINBOW_PRESET[idx % len(RAINBOW_PRESET)]
     return out
@@ -57,15 +69,28 @@ def save_palette_csv(path: str | Path, classification_column: str, palette: Dict
 
 
 def load_palette_csv(path: str | Path, classification_column: str) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    with open(path, "r", newline="", encoding="utf-8") as f:
+    exact_matches: Dict[str, str] = {}
+    fallback_matches: Dict[str, str] = {}
+    seen_classifications: set[str] = set()
+    target = _normalize_text(classification_column)
+
+    with open(path, "r", newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            if row.get("classification_column", "") != classification_column:
-                continue
             category = str(row.get("category", "")).strip()
             if not category:
                 continue
+            classification_value = str(row.get("classification_column", "")).strip()
+            normalized_classification = _normalize_text(classification_value)
+            if normalized_classification:
+                seen_classifications.add(normalized_classification)
             color = normalize_hex(str(row.get("color_hex", "")))
-            out[category] = color
-    return out
+            if normalized_classification == target:
+                exact_matches[category] = color
+            fallback_matches[category] = color
+
+    if exact_matches:
+        return exact_matches
+    if len(seen_classifications) <= 1:
+        return fallback_matches
+    return {}

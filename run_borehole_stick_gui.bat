@@ -32,7 +32,7 @@ if not exist ".venv\Scripts\python.exe" (
 
 set "PYTHON_EXE=.venv\Scripts\python.exe"
 
-%PYTHON_EXE% -c "import numpy, pandas, shapefile" >nul 2>&1
+%PYTHON_EXE% -c "import numpy, pandas, shapefile, PIL, pyproj" >nul 2>&1
 if not %errorlevel%==0 (
     echo Installing required packages from requirements.txt...
     %PYTHON_EXE% -m pip install -r requirements.txt

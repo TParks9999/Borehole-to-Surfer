@@ -12,6 +12,7 @@ DEFAULT_MIN_LABEL_LENGTH_M = 1.0
 DEFAULT_THIN_MIN_ABS_M = 0.3
 DEFAULT_THIN_RELATIVE_TO_MEDIAN = 0.2
 DEFAULT_ADJACENT_GAP_TOLERANCE_M = 0.05
+DEFAULT_BOREHOLE_NAME_OFFSET_M = 1.0
 
 
 def _safe_computed_name(base: str, existing_cols: set[str]) -> str:
@@ -316,3 +317,62 @@ def write_postmap_csvs(
     full_df.to_csv(full_out, index=False)
     labels_df.to_csv(labels_out, index=False)
     return full_out, len(full_df), labels_out, len(labels_df)
+
+
+def build_borehole_name_postmap_dataframe(
+    projected_holes: Iterable[ProjectedHole],
+    collars: Iterable[CollarRecord],
+    label_offset_m: float = DEFAULT_BOREHOLE_NAME_OFFSET_M,
+) -> pd.DataFrame:
+    projected_df = pd.DataFrame(
+        [
+            {
+                "hole_id": item.hole_id,
+                "chainage": item.chainage,
+                "offset_m": item.offset_m,
+                "included": item.included,
+            }
+            for item in projected_holes
+        ]
+    )
+    collar_df = pd.DataFrame(
+        [
+            {
+                "hole_id": item.hole_id,
+                "collar_rl": item.rl,
+            }
+            for item in collars
+        ]
+    )
+
+    if projected_df.empty or collar_df.empty:
+        return pd.DataFrame(
+            columns=["hole_id", "chainage", "elevation_ground", "elevation_label", "offset_m", "included"]
+        )
+
+    out = projected_df.merge(collar_df, how="left", on="hole_id")
+    out = out[out["included"] == True].copy()  # noqa: E712
+    out = out[out["chainage"].notna() & out["collar_rl"].notna()].copy()
+    out["elevation_ground"] = out["collar_rl"]
+    out["elevation_label"] = out["collar_rl"] + float(label_offset_m)
+    out = out[
+        ["hole_id", "chainage", "elevation_ground", "elevation_label", "offset_m", "included"]
+    ].sort_values(by=["chainage", "hole_id"], ascending=[True, True], kind="stable")
+    return out.reset_index(drop=True)
+
+
+def write_borehole_name_postmap_csv(
+    path: str | Path,
+    projected_holes: Iterable[ProjectedHole],
+    collars: Iterable[CollarRecord],
+    label_offset_m: float = DEFAULT_BOREHOLE_NAME_OFFSET_M,
+) -> Tuple[Path, int]:
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    df = build_borehole_name_postmap_dataframe(
+        projected_holes=projected_holes,
+        collars=collars,
+        label_offset_m=label_offset_m,
+    )
+    df.to_csv(out, index=False)
+    return out, len(df)
